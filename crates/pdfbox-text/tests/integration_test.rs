@@ -2,6 +2,8 @@
 
 use std::path::Path;
 use pdfbox_text::PdfDocument;
+use pdfbox_text::cos_helpers::DocumentExt;
+use pdfbox_text::encoding::cmap_parser;
 use pdfbox_text::stream::engine::StreamEngine;
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
@@ -175,4 +177,50 @@ fn test_stream_engine_real_pdf() {
     let with_font = segments.iter().filter(|s| s.font_name.is_some()).count();
     println!("Segments with font: {}/{}", with_font, segments.len());
     assert!(with_font > 0, "at least some segments should have font names");
+}
+
+#[test]
+fn test_tounicode_cmap_parsing() {
+    let path = Path::new(SAMPLE_KOREAN_PDF);
+    if !path.exists() {
+        return;
+    }
+    let doc = PdfDocument::open(path).unwrap();
+    let inner = doc.inner_arc();
+    let page = doc.page(0).unwrap();
+    let resources = page.resources().unwrap().unwrap();
+
+    let font_names = resources.font_names().unwrap();
+    let mut found_tounicode = false;
+
+    for name in &font_names {
+        if let Some((font_dict, _oid)) = resources.get_font_dict(name).unwrap() {
+            // Check for ToUnicode stream
+            if let Ok(to_unicode_obj) = font_dict.get(b"ToUnicode") {
+                let stream_data = inner.get_stream_data(to_unicode_obj);
+                if let Ok(data) = stream_data {
+                    let cmap = cmap_parser::parse_cmap(&data);
+                    println!(
+                        "Font {:?}: ToUnicode CMap has {} Unicode mappings",
+                        String::from_utf8_lossy(name),
+                        cmap.unicode_mapping_count()
+                    );
+                    if cmap.unicode_mapping_count() > 0 {
+                        found_tounicode = true;
+                        // Try to look up some common code values
+                        let ranges = cmap.codespace_ranges();
+                        println!("  Codespace ranges: {}", ranges.len());
+                        for r in ranges {
+                            println!(
+                                "    length={}, start={:?}, end={:?}",
+                                r.code_length, r.start, r.end
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(found_tounicode, "should find at least one font with a ToUnicode CMap");
 }

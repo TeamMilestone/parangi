@@ -127,9 +127,14 @@ impl DocumentExt for Document {
             other => other,
         };
         match obj {
-            Object::Stream(stream) => stream
-                .decompressed_content()
-                .map_err(|e| PdfError::Parse(format!("stream decompression: {}", e))),
+            Object::Stream(stream) => {
+                // Try decompressed_content first, fall back to raw content.
+                // lopdf sometimes fails on streams without a Filter entry.
+                match stream.decompressed_content() {
+                    Ok(data) => Ok(data),
+                    Err(_) => Ok(stream.content.clone()),
+                }
+            }
             _ => Err(PdfError::Parse(format!(
                 "expected stream, got {:?}",
                 obj.type_name()

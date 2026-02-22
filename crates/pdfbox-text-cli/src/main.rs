@@ -86,12 +86,12 @@ fn main() {
                 Ok(text) => {
                     success_count += 1;
                     if let Some(dir) = output_dir {
-                        let stem = batch_result
+                        let filename = batch_result
                             .path
-                            .file_stem()
+                            .file_name()
                             .unwrap_or_default()
                             .to_string_lossy();
-                        let out_path = dir.join(format!("{}.txt", stem));
+                        let out_path = dir.join(format!("{}.txt", filename));
                         if let Err(e) = std::fs::write(&out_path, &text) {
                             let mut err = stderr.lock();
                             let _ = writeln!(err, "Error writing {}: {}", out_path.display(), e);

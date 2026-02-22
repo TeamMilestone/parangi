@@ -7,28 +7,37 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lopdf::{content::Content, Document, Object};
+use lopdf::{content::Content, Document, Object, ObjectId};
 
 use super::graphics_state::GraphicsStateStack;
 use super::matrix::Matrix;
 use super::operators::*;
 use super::text_state::RenderingMode;
-use crate::cos_helpers::obj_to_f32;
+use crate::cos_helpers::{name_to_string, obj_to_f32};
 use crate::font::PdfFont;
 use crate::text::TextPosition;
 use crate::{PdfError, Result};
+
+/// Pre-extracted Form XObject data (avoids borrow conflicts).
+struct FormData {
+    content_bytes: Vec<u8>,
+    matrix: Option<Matrix>,
+    resources_fonts: Option<HashMap<Vec<u8>, PdfFont>>,
+    resources_xobject_refs: Option<HashMap<Vec<u8>, ObjectId>>,
+}
 
 /// Content stream processing engine.
 ///
 /// Processes a single page's content stream, maintaining graphics state
 /// and collecting TextPosition objects for each glyph.
 pub struct StreamEngine {
-    #[allow(dead_code)] // Used in iter 11 for Form XObject processing
     doc: Arc<Document>,
     state_stack: GraphicsStateStack,
 
     /// Loaded fonts keyed by resource name (e.g. b"F1").
     fonts: HashMap<Vec<u8>, PdfFont>,
+    /// XObject references in current scope (name → ObjectId).
+    xobject_refs: HashMap<Vec<u8>, ObjectId>,
     /// Collected text positions from this content stream.
     text_positions: Vec<TextPosition>,
 
@@ -38,6 +47,9 @@ pub struct StreamEngine {
     page_width: f32,
     /// Page height.
     page_height: f32,
+
+    /// Recursion depth for Form XObject nesting.
+    nesting_level: u32,
 }
 
 impl StreamEngine {
@@ -47,10 +59,12 @@ impl StreamEngine {
             doc,
             state_stack: GraphicsStateStack::new(),
             fonts: HashMap::new(),
+            xobject_refs: HashMap::new(),
             text_positions: Vec::new(),
             page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
+            nesting_level: 0,
         }
     }
 
@@ -64,6 +78,12 @@ impl StreamEngine {
     /// Set pre-loaded fonts for character decoding.
     pub fn set_fonts(&mut self, fonts: HashMap<Vec<u8>, PdfFont>) {
         self.fonts = fonts;
+    }
+
+    /// Load fonts and XObject references from a resources dictionary.
+    pub fn load_resources(&mut self, resources_dict: &lopdf::Dictionary) {
+        self.fonts = Self::load_fonts_from_resources(&self.doc, resources_dict);
+        self.xobject_refs = Self::load_xobject_refs(&self.doc, resources_dict);
     }
 
     /// Process a content stream (raw bytes).
@@ -130,11 +150,8 @@ impl StreamEngine {
             // ExtGState
             GS => self.op_gs(operands),
 
-            // XObject (placeholder — full implementation in iter 11)
-            DO => {
-                // TODO: handle Form XObjects
-                Ok(())
-            }
+            // XObject (Form XObject processing)
+            DO => self.op_do(operands),
 
             // Marked content (placeholder — full implementation in iter 12)
             BMC | BDC | EMC => Ok(()),
@@ -369,6 +386,271 @@ impl StreamEngine {
             log::debug!("gs: ExtGState '{}'", String::from_utf8_lossy(name));
         }
         Ok(())
+    }
+
+    // === Form XObject (Do operator) ===
+
+    /// Do: Invoke a named XObject.
+    fn op_do(&mut self, operands: &[Object]) -> Result<()> {
+        if operands.is_empty() {
+            return Ok(());
+        }
+        let name = match &operands[0] {
+            Object::Name(n) => n.clone(),
+            _ => return Ok(()),
+        };
+
+        // Look up XObject reference
+        let oid = match self.xobject_refs.get(&name) {
+            Some(&oid) => oid,
+            None => return Ok(()), // Unknown XObject, skip
+        };
+
+        // Extract Form data (all immutable operations, avoids borrow conflicts)
+        let form_data = self.extract_form_data(oid)?;
+        if let Some(data) = form_data {
+            self.nesting_level += 1;
+            if self.nesting_level > 50 {
+                self.nesting_level -= 1;
+                log::warn!("Form XObject nesting too deep (>50), skipping");
+                return Ok(());
+            }
+            let result = self.process_form(data);
+            self.nesting_level -= 1;
+            return result;
+        }
+
+        Ok(())
+    }
+
+    /// Extract all data from a Form XObject without mutable self borrow.
+    fn extract_form_data(&self, oid: ObjectId) -> Result<Option<FormData>> {
+        let obj = self
+            .doc
+            .get_object(oid)
+            .map_err(|e| PdfError::Parse(format!("XObject {:?}: {}", oid, e)))?;
+
+        let stream = match obj {
+            Object::Stream(s) => s,
+            _ => return Ok(None),
+        };
+
+        // Check Subtype = Form
+        let subtype = stream
+            .dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|o| match o {
+                Object::Name(n) => Some(name_to_string(n)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if subtype != "Form" {
+            return Ok(None);
+        }
+
+        // Decompress content
+        let content_bytes = stream
+            .decompressed_content()
+            .map_err(|e| PdfError::Parse(format!("Form XObject decompression: {}", e)))?;
+
+        if content_bytes.is_empty() {
+            return Ok(None);
+        }
+
+        // Read Form matrix
+        let matrix = Self::read_form_matrix(&self.doc, &stream.dict);
+
+        // Load Form's resources
+        let (res_fonts, res_xobjects) = self.load_form_resources(&stream.dict);
+
+        Ok(Some(FormData {
+            content_bytes,
+            matrix,
+            resources_fonts: res_fonts,
+            resources_xobject_refs: res_xobjects,
+        }))
+    }
+
+    /// Process a pre-extracted Form XObject.
+    fn process_form(&mut self, data: FormData) -> Result<()> {
+        let has_own_resources = data.resources_fonts.is_some();
+
+        // 1. Swap in Form's resources if it has its own; otherwise inherit parent's.
+        let saved_fonts;
+        let saved_xobject_refs;
+
+        if has_own_resources {
+            saved_fonts =
+                Some(std::mem::replace(&mut self.fonts, data.resources_fonts.unwrap()));
+            saved_xobject_refs = Some(std::mem::replace(
+                &mut self.xobject_refs,
+                data.resources_xobject_refs.unwrap_or_default(),
+            ));
+        } else {
+            saved_fonts = None;
+            saved_xobject_refs = None;
+        }
+
+        // 2. Save entire graphics state stack
+        let saved_stack = self.state_stack.save_full();
+
+        // 3. Apply Form's matrix to CTM
+        if let Some(form_matrix) = data.matrix {
+            self.state_stack
+                .current_mut()
+                .ctm
+                .concatenate(&form_matrix);
+        }
+
+        // 4. Process Form's content stream
+        let result = self.process_content(&data.content_bytes);
+
+        // 5. Restore graphics state
+        self.state_stack.restore_full(saved_stack);
+
+        // 6. Restore resources if we swapped them
+        if let Some(fonts) = saved_fonts {
+            self.fonts = fonts;
+        }
+        if let Some(xobjs) = saved_xobject_refs {
+            self.xobject_refs = xobjs;
+        }
+
+        result
+    }
+
+    /// Read the Matrix entry from a Form XObject dictionary.
+    fn read_form_matrix(doc: &Document, form_dict: &lopdf::Dictionary) -> Option<Matrix> {
+        let matrix_obj = form_dict.get(b"Matrix").ok()?;
+        let arr = match matrix_obj {
+            Object::Array(arr) if arr.len() >= 6 => arr,
+            Object::Reference(id) => match doc.get_object(*id).ok()? {
+                Object::Array(arr) if arr.len() >= 6 => arr,
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        let vals: Vec<f32> = arr
+            .iter()
+            .take(6)
+            .map(|o| obj_to_f32(o).unwrap_or(0.0))
+            .collect();
+        Some(Matrix::from_values(
+            vals[0], vals[1], vals[2], vals[3], vals[4], vals[5],
+        ))
+    }
+
+    /// Load resources (fonts + xobjects) from a Form XObject's dictionary.
+    /// Returns (Some(fonts), Some(xobjects)) if the Form has a Resources entry,
+    /// or (None, None) to inherit parent's resources.
+    fn load_form_resources(
+        &self,
+        form_dict: &lopdf::Dictionary,
+    ) -> (
+        Option<HashMap<Vec<u8>, PdfFont>>,
+        Option<HashMap<Vec<u8>, ObjectId>>,
+    ) {
+        let res_obj = match form_dict.get(b"Resources") {
+            Ok(obj) => obj,
+            Err(_) => return (None, None), // No Resources → inherit parent
+        };
+
+        let res_dict = match res_obj {
+            Object::Reference(id) => match self.doc.get_object(*id) {
+                Ok(obj) => match obj.as_dict() {
+                    Ok(d) => d,
+                    Err(_) => return (None, None),
+                },
+                Err(_) => return (None, None),
+            },
+            Object::Dictionary(d) => d,
+            _ => return (None, None),
+        };
+
+        let fonts = Self::load_fonts_from_resources(&self.doc, res_dict);
+        let xobject_refs = Self::load_xobject_refs(&self.doc, res_dict);
+        (Some(fonts), Some(xobject_refs))
+    }
+
+    /// Load fonts from a Resources dictionary's Font sub-entry.
+    fn load_fonts_from_resources(
+        doc: &Document,
+        resources_dict: &lopdf::Dictionary,
+    ) -> HashMap<Vec<u8>, PdfFont> {
+        let mut fonts = HashMap::new();
+
+        let font_dict = match resources_dict.get(b"Font") {
+            Ok(obj) => {
+                let resolved = match obj {
+                    Object::Reference(id) => doc.get_object(*id).ok(),
+                    _ => Some(obj),
+                };
+                match resolved.and_then(|o| o.as_dict().ok()) {
+                    Some(d) => d,
+                    None => return fonts,
+                }
+            }
+            Err(_) => return fonts,
+        };
+
+        for (name, obj) in font_dict.iter() {
+            let (dict, oid) = match obj {
+                Object::Reference(id) => match doc.get_object(*id) {
+                    Ok(o) => match o.as_dict() {
+                        Ok(d) => (d, *id),
+                        Err(_) => continue,
+                    },
+                    Err(_) => continue,
+                },
+                Object::Dictionary(d) => (d, (0, 0)),
+                _ => continue,
+            };
+            match PdfFont::from_dict(doc, dict, oid) {
+                Ok(font) => {
+                    fonts.insert(name.clone(), font);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to load font {:?}: {}",
+                        String::from_utf8_lossy(name),
+                        e
+                    );
+                }
+            }
+        }
+        fonts
+    }
+
+    /// Load XObject references from a Resources dictionary's XObject sub-entry.
+    fn load_xobject_refs(
+        doc: &Document,
+        resources_dict: &lopdf::Dictionary,
+    ) -> HashMap<Vec<u8>, ObjectId> {
+        let mut refs = HashMap::new();
+
+        let xobj_dict = match resources_dict.get(b"XObject") {
+            Ok(obj) => {
+                let resolved = match obj {
+                    Object::Reference(id) => doc.get_object(*id).ok(),
+                    _ => Some(obj),
+                };
+                match resolved.and_then(|o| o.as_dict().ok()) {
+                    Some(d) => d,
+                    None => return refs,
+                }
+            }
+            Err(_) => return refs,
+        };
+
+        for (name, obj) in xobj_dict.iter() {
+            if let Object::Reference(id) = obj {
+                refs.insert(name.clone(), *id);
+            }
+        }
+        refs
     }
 
     // === Text processing (showText / showGlyph port) ===

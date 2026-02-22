@@ -1,6 +1,5 @@
 //! Integration tests using real PDF files.
 
-use std::collections::HashMap;
 use std::path::Path;
 use pdfbox_text::PdfDocument;
 use pdfbox_text::cos_helpers::DocumentExt;
@@ -168,24 +167,14 @@ fn test_stream_engine_real_pdf() {
     let page = doc.page(0).unwrap();
     let content_bytes = page.content_bytes().unwrap();
 
-    // Load fonts from resources
+    // Load resources (fonts + xobjects)
     let resources = page.resources().unwrap().unwrap();
-    let font_names = resources.font_names().unwrap();
-    let mut fonts = HashMap::new();
-    for name in &font_names {
-        if let Ok(Some((font_dict, oid))) = resources.get_font_dict(name) {
-            if let Ok(font) = PdfFont::from_dict(doc.inner_arc().as_ref(), font_dict, oid) {
-                fonts.insert(name.clone(), font);
-            }
-        }
-    }
-
     let rotation = page.rotation().unwrap_or(0) as i32;
     let media_box = page.media_box().unwrap();
 
     let mut engine = StreamEngine::new(doc.inner_arc());
     engine.set_page_info(rotation, media_box[2], media_box[3]);
-    engine.set_fonts(fonts);
+    engine.load_resources(resources.dictionary());
     engine.process_content(&content_bytes).expect("stream engine should process content");
 
     let positions = engine.text_positions();

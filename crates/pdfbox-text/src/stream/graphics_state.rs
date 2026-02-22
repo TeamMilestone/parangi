@@ -110,6 +110,28 @@ impl GraphicsStateStack {
     pub fn depth(&self) -> usize {
         self.stack.len()
     }
+
+    /// Save the entire graphics state stack (for Form XObject processing).
+    /// Returns a snapshot that can be restored later.
+    pub fn save_full(&self) -> SavedGraphicsStack {
+        SavedGraphicsStack {
+            stack: self.stack.clone(),
+            current: self.current.clone(),
+        }
+    }
+
+    /// Restore the entire graphics state stack from a snapshot.
+    pub fn restore_full(&mut self, saved: SavedGraphicsStack) {
+        self.stack = saved.stack;
+        self.current = saved.current;
+    }
+}
+
+/// A complete snapshot of the graphics state stack.
+#[derive(Debug)]
+pub struct SavedGraphicsStack {
+    stack: Vec<GraphicsState>,
+    current: GraphicsState,
 }
 
 impl Default for GraphicsStateStack {

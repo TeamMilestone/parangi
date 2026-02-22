@@ -10,7 +10,7 @@
 //! ```
 
 /// A 3x3 affine transformation matrix stored as a flat 9-element array (row-major).
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Matrix {
     /// Row-major storage: [a, b, 0, c, d, 0, tx, ty, 1]
     single: [f32; 9],

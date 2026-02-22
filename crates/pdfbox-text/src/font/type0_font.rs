@@ -150,6 +150,32 @@ impl Type0Font {
         self.widths.get(&cid).copied().unwrap_or(self.default_width)
     }
 
+    /// Read a character code from the byte stream using the encoding CMap's
+    /// codespace ranges. Returns (code, bytes_consumed).
+    pub fn read_code(&self, data: &[u8], offset: usize) -> (u32, usize) {
+        let remaining = data.len() - offset;
+        if remaining == 0 {
+            return (0, 0);
+        }
+
+        let min_len = self.encoding_cmap.min_code_length().max(1);
+        let max_len = self.encoding_cmap.max_code_length().min(remaining);
+
+        for len in min_len..=max_len {
+            let bytes = &data[offset..offset + len];
+            if self.encoding_cmap.matches_codespace(bytes) {
+                let mut code = 0u32;
+                for &b in bytes {
+                    code = (code << 8) | b as u32;
+                }
+                return (code, len);
+            }
+        }
+
+        // Fallback: single byte
+        (data[offset] as u32, 1)
+    }
+
     /// Get the base font name.
     pub fn base_font(&self) -> &str {
         &self.base_font

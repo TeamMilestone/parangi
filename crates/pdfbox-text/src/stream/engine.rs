@@ -4,6 +4,7 @@
 //! Processes PDF content stream operators to update graphics/text state
 //! and extract text positioning information.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lopdf::{content::Content, Document, Object};
@@ -13,32 +14,30 @@ use super::matrix::Matrix;
 use super::operators::*;
 use super::text_state::RenderingMode;
 use crate::cos_helpers::obj_to_f32;
+use crate::font::PdfFont;
+use crate::text::TextPosition;
 use crate::{PdfError, Result};
-
-/// A raw text segment extracted from the content stream.
-/// Later iterations will replace this with full TextPosition.
-#[derive(Debug, Clone)]
-pub struct RawTextSegment {
-    /// The raw bytes from the PDF string operand.
-    pub bytes: Vec<u8>,
-    /// Font resource name active when this text was rendered.
-    pub font_name: Option<Vec<u8>>,
-    /// Font size.
-    pub font_size: f32,
-    /// Text rendering matrix at the start of this segment.
-    /// This is text_matrix × CTM.
-    pub text_rendering_matrix: Matrix,
-}
 
 /// Content stream processing engine.
 ///
 /// Processes a single page's content stream, maintaining graphics state
-/// and collecting text segments.
+/// and collecting TextPosition objects for each glyph.
 pub struct StreamEngine {
+    #[allow(dead_code)] // Used in iter 11 for Form XObject processing
     doc: Arc<Document>,
     state_stack: GraphicsStateStack,
-    /// Collected text segments from this content stream.
-    text_segments: Vec<RawTextSegment>,
+
+    /// Loaded fonts keyed by resource name (e.g. b"F1").
+    fonts: HashMap<Vec<u8>, PdfFont>,
+    /// Collected text positions from this content stream.
+    text_positions: Vec<TextPosition>,
+
+    /// Page rotation (0, 90, 180, 270).
+    page_rotation: i32,
+    /// Page width (from CropBox or MediaBox).
+    page_width: f32,
+    /// Page height.
+    page_height: f32,
 }
 
 impl StreamEngine {
@@ -47,8 +46,24 @@ impl StreamEngine {
         Self {
             doc,
             state_stack: GraphicsStateStack::new(),
-            text_segments: Vec::new(),
+            fonts: HashMap::new(),
+            text_positions: Vec::new(),
+            page_rotation: 0,
+            page_width: 612.0,
+            page_height: 792.0,
         }
+    }
+
+    /// Set page geometry for TextPosition creation.
+    pub fn set_page_info(&mut self, rotation: i32, width: f32, height: f32) {
+        self.page_rotation = rotation;
+        self.page_width = width;
+        self.page_height = height;
+    }
+
+    /// Set pre-loaded fonts for character decoding.
+    pub fn set_fonts(&mut self, fonts: HashMap<Vec<u8>, PdfFont>) {
+        self.fonts = fonts;
     }
 
     /// Process a content stream (raw bytes).
@@ -69,14 +84,14 @@ impl StreamEngine {
         Ok(())
     }
 
-    /// Get the collected text segments.
-    pub fn text_segments(&self) -> &[RawTextSegment] {
-        &self.text_segments
+    /// Get the collected text positions.
+    pub fn text_positions(&self) -> &[TextPosition] {
+        &self.text_positions
     }
 
-    /// Consume and return the collected text segments.
-    pub fn into_text_segments(self) -> Vec<RawTextSegment> {
-        self.text_segments
+    /// Consume and return the collected text positions.
+    pub fn into_text_positions(self) -> Vec<TextPosition> {
+        self.text_positions
     }
 
     /// Process a single operator with its operands.
@@ -292,7 +307,7 @@ impl StreamEngine {
             return Ok(()); // Not inside BT..ET
         }
         if let Object::String(bytes, _) = &operands[0] {
-            self.show_text_bytes(bytes)?;
+            self.show_text(bytes)?;
         }
         Ok(())
     }
@@ -309,7 +324,7 @@ impl StreamEngine {
             for item in arr {
                 match item {
                     Object::String(bytes, _) => {
-                        self.show_text_bytes(bytes)?;
+                        self.show_text(bytes)?;
                     }
                     Object::Integer(n) => {
                         self.apply_tj_adjustment(*n as f32);
@@ -335,14 +350,11 @@ impl StreamEngine {
         if operands.len() < 3 {
             return Err(PdfError::Parse("\" requires 3 operands".into()));
         }
-        // First operand: word spacing
         self.state_stack.current_mut().text_state.word_spacing = obj_to_f32(&operands[0])?;
-        // Second operand: character spacing
         self.state_stack.current_mut().text_state.character_spacing = obj_to_f32(&operands[1])?;
-        // Third operand: text string (show via quote)
         self.op_t_star()?;
         if let Object::String(bytes, _) = &operands[2] {
-            self.show_text_bytes(bytes)?;
+            self.show_text(bytes)?;
         }
         Ok(())
     }
@@ -350,34 +362,158 @@ impl StreamEngine {
     // === ExtGState ===
 
     fn op_gs(&mut self, operands: &[Object]) -> Result<()> {
-        // gs applies extended graphics state parameters.
-        // For text extraction, we mainly care about font settings if present.
-        // Full implementation deferred; this is a minimal placeholder.
         if operands.is_empty() {
             return Ok(());
         }
-        // The operand is the name of the ExtGState resource.
-        // We would look it up and apply relevant parameters.
-        // For now, just log it.
         if let Object::Name(name) = &operands[0] {
             log::debug!("gs: ExtGState '{}'", String::from_utf8_lossy(name));
         }
         Ok(())
     }
 
-    // === Internal helpers ===
+    // === Text processing (showText / showGlyph port) ===
 
-    /// Record a text segment from raw bytes.
-    fn show_text_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        let gs = self.state_stack.current();
-        let trm = self.compute_text_rendering_matrix(gs);
-        let segment = RawTextSegment {
-            bytes: bytes.to_vec(),
-            font_name: gs.text_state.font_name.clone(),
-            font_size: gs.text_state.font_size,
-            text_rendering_matrix: trm,
-        };
-        self.text_segments.push(segment);
+    /// Process a text string byte-by-byte, creating TextPosition for each glyph.
+    ///
+    /// Ported from PDFStreamEngine.showText() + LegacyPDFStreamEngine.showGlyph().
+    fn show_text(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        // Read text state values upfront to avoid borrow issues.
+        let font_name = self.state_stack.current().text_state.font_name.clone();
+        let font_size = self.state_stack.current().text_state.font_size;
+        let hs = self.state_stack.current().text_state.horizontal_scaling_fraction();
+        let char_spacing = self.state_stack.current().text_state.character_spacing;
+        let word_spacing = self.state_stack.current().text_state.word_spacing;
+        let _rise = self.state_stack.current().text_state.rise;
+
+        // Check if we have a font loaded.
+        let has_font = font_name
+            .as_ref()
+            .map(|n| self.fonts.contains_key(n))
+            .unwrap_or(false);
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            // --- Read character code ---
+            let (code, code_length) = if has_font {
+                let name = font_name.as_ref().unwrap();
+                self.fonts[name].read_code(bytes, offset)
+            } else {
+                // No font: single-byte fallback
+                (bytes[offset] as u32, 1)
+            };
+
+            if code_length == 0 {
+                break;
+            }
+            offset += code_length;
+
+            // --- Compute text rendering matrix BEFORE glyph ---
+            let trm = self.compute_text_rendering_matrix();
+
+            // --- Get glyph width (text space, 1/1000 units) ---
+            let width_1000 = if has_font {
+                let name = font_name.as_ref().unwrap();
+                self.fonts[name].get_width(code)
+            } else {
+                0.0
+            };
+            let displacement_x = width_1000 / 1000.0;
+
+            // --- Compute end position (visual glyph extent) ---
+            // td = displacement × fontSize × horizontalScaling
+            let tx_visual = displacement_x * font_size * hs;
+            let tm = self.state_stack.current().text_matrix.as_ref().unwrap();
+            let ctm = &self.state_stack.current().ctm;
+            let td = Matrix::translate_instance(tx_visual, 0.0);
+            let next_trm = td.multiply(tm).multiply(ctm);
+            let end_x = next_trm.translate_x();
+            let end_y = next_trm.translate_y();
+
+            // --- Width in display space ---
+            let dx_display = end_x - trm.translate_x();
+
+            // --- Font height in display space ---
+            // Simplified: use fontSize (text space) scaled by TRM Y factor.
+            // Full implementation would use FontDescriptor CapHeight/BBox.
+            let font_height_text = 1.0; // 1.0 = full em in text space
+            let dy_display = (font_height_text * trm.scaling_factor_y()).abs();
+
+            // --- Space width in display space ---
+            let space_width_text = if has_font {
+                let name = font_name.as_ref().unwrap();
+                let sw = self.fonts[name].get_width(32) / 1000.0;
+                if sw > 0.0 {
+                    sw
+                } else {
+                    // Fallback: use average width heuristic
+                    let avg = self.fonts[name].get_width(65) / 1000.0;
+                    if avg > 0.0 {
+                        avg * 0.80
+                    } else {
+                        0.25
+                    }
+                }
+            } else {
+                0.25
+            };
+            let space_width_display = (space_width_text * trm.scaling_factor_x()).abs();
+
+            // --- Unicode mapping ---
+            let unicode = if has_font {
+                let name = font_name.as_ref().unwrap();
+                self.fonts[name].to_unicode(code).unwrap_or_default()
+            } else {
+                // Fallback: interpret as Latin-1
+                if let Some(ch) = char::from_u32(code) {
+                    ch.to_string()
+                } else {
+                    String::new()
+                }
+            };
+
+            // --- Font size in points ---
+            let tm_ref = self.state_stack.current().text_matrix.as_ref().unwrap();
+            let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
+
+            // --- Create TextPosition ---
+            if !unicode.is_empty() {
+                let tp = TextPosition {
+                    unicode,
+                    char_codes: vec![code],
+                    text_matrix: trm,
+                    end_x,
+                    end_y,
+                    max_height: dy_display,
+                    individual_width: dx_display,
+                    space_width: space_width_display,
+                    font_size,
+                    font_size_in_pt,
+                    page_rotation: self.page_rotation,
+                    page_width: self.page_width,
+                    page_height: self.page_height,
+                };
+                self.text_positions.push(tp);
+            }
+
+            // --- Advance text matrix ---
+            // tx = (displacement × fontSize + charSpacing + wordSpacing) × Hs
+            let word_space = if code_length == 1 && code == 32 {
+                word_spacing
+            } else {
+                0.0
+            };
+            let total_tx = (displacement_x * font_size + char_spacing + word_space) * hs;
+
+            let gs = self.state_stack.current_mut();
+            if let Some(ref mut tm) = gs.text_matrix {
+                tm.translate(total_tx, 0.0);
+            }
+        }
+
         Ok(())
     }
 
@@ -393,22 +529,19 @@ impl StreamEngine {
 
         let gs = self.state_stack.current_mut();
         if let Some(ref mut tm) = gs.text_matrix {
-            let translate = Matrix::translate_instance(tx, 0.0);
-            tm.concatenate(&translate);
+            tm.translate(tx, 0.0);
         }
     }
 
     /// Compute the text rendering matrix: Tfs × Th × Tm × CTM.
-    fn compute_text_rendering_matrix(
-        &self,
-        gs: &super::graphics_state::GraphicsState,
-    ) -> Matrix {
+    fn compute_text_rendering_matrix(&self) -> Matrix {
+        let gs = self.state_stack.current();
         let font_size = gs.text_state.font_size;
         let hs = gs.text_state.horizontal_scaling_fraction();
         let rise = gs.text_state.rise;
 
         // Text rendering matrix per PDF spec (section 9.4.4):
-        // TRM = [fontSize×Hs  0  0; 0  fontSize  0; 0  rise  1] × Tm × CTM
+        // TRM = [fontSize×Hs 0 0; 0 fontSize 0; 0 rise 1] × Tm × CTM
         let params = Matrix::from_values(font_size * hs, 0.0, 0.0, font_size, 0.0, rise);
 
         if let Some(ref tm) = gs.text_matrix {
@@ -428,14 +561,13 @@ mod tests {
         let doc = Arc::new(Document::with_version("1.5"));
         let mut engine = StreamEngine::new(doc);
         engine.process_content(b"").unwrap();
-        assert!(engine.text_segments().is_empty());
+        assert!(engine.text_positions().is_empty());
     }
 
     #[test]
     fn test_bt_et() {
         let doc = Arc::new(Document::with_version("1.5"));
         let mut engine = StreamEngine::new(doc);
-        // Process BT/ET
         engine.process_operator(BT, &[]).unwrap();
         assert!(engine.state_stack.current().text_matrix.is_some());
         engine.process_operator(ET, &[]).unwrap();
@@ -447,31 +579,32 @@ mod tests {
         let doc = Arc::new(Document::with_version("1.5"));
         let mut engine = StreamEngine::new(doc);
 
-        // Tc 2.0
         engine
             .process_operator(TC, &[Object::Real(2.0)])
             .unwrap();
-        assert_eq!(engine.state_stack.current().text_state.character_spacing, 2.0);
+        assert_eq!(
+            engine.state_stack.current().text_state.character_spacing,
+            2.0
+        );
 
-        // Tw 1.5
         engine
             .process_operator(TW, &[Object::Real(1.5)])
             .unwrap();
         assert_eq!(engine.state_stack.current().text_state.word_spacing, 1.5);
 
-        // Tz 80
         engine
             .process_operator(TZ, &[Object::Integer(80)])
             .unwrap();
-        assert_eq!(engine.state_stack.current().text_state.horizontal_scaling, 80.0);
+        assert_eq!(
+            engine.state_stack.current().text_state.horizontal_scaling,
+            80.0
+        );
 
-        // TL 14
         engine
             .process_operator(TL, &[Object::Integer(14)])
             .unwrap();
         assert_eq!(engine.state_stack.current().text_state.leading, 14.0);
 
-        // Tf /F1 12
         engine
             .process_operator(
                 TF,
@@ -484,7 +617,6 @@ mod tests {
         );
         assert_eq!(engine.state_stack.current().text_state.font_size, 12.0);
 
-        // Tr 1
         engine
             .process_operator(TR, &[Object::Integer(1)])
             .unwrap();
@@ -493,7 +625,6 @@ mod tests {
             RenderingMode::Stroke
         );
 
-        // Ts 5
         engine
             .process_operator(TS, &[Object::Real(5.0)])
             .unwrap();
@@ -507,7 +638,6 @@ mod tests {
 
         engine.process_operator(BT, &[]).unwrap();
 
-        // Tm sets text matrix directly
         engine
             .process_operator(
                 TM,
@@ -531,7 +661,6 @@ mod tests {
         assert!((tm.translate_x() - 100.0).abs() < 0.001);
         assert!((tm.translate_y() - 700.0).abs() < 0.001);
 
-        // Td moves relative
         engine
             .process_operator(TD_LOWER, &[Object::Integer(50), Object::Integer(0)])
             .unwrap();
@@ -546,7 +675,8 @@ mod tests {
     }
 
     #[test]
-    fn test_show_text_collects_segments() {
+    fn test_show_text_without_font() {
+        // Without loaded fonts, show_text should still work (Latin-1 fallback)
         let doc = Arc::new(Document::with_version("1.5"));
         let mut engine = StreamEngine::new(doc);
 
@@ -558,25 +688,61 @@ mod tests {
             )
             .unwrap();
 
-        // Tj shows text
         engine
             .process_operator(
                 TJ_LOWER,
-                &[Object::String(b"Hello".to_vec(), lopdf::StringFormat::Literal)],
+                &[Object::String(
+                    b"Hello".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
             )
             .unwrap();
 
-        assert_eq!(engine.text_segments().len(), 1);
-        assert_eq!(engine.text_segments()[0].bytes, b"Hello");
-        assert_eq!(engine.text_segments()[0].font_size, 12.0);
+        // Each byte generates a TextPosition with Latin-1 fallback
+        assert_eq!(engine.text_positions().len(), 5);
+        assert_eq!(engine.text_positions()[0].unicode, "H");
+        assert_eq!(engine.text_positions()[1].unicode, "e");
+        assert_eq!(engine.text_positions()[4].unicode, "o");
     }
 
     #[test]
-    fn test_tj_array() {
+    fn test_show_text_with_font() {
+        use crate::font::simple_font::SimpleFont;
+        use lopdf::dictionary;
+
         let doc = Arc::new(Document::with_version("1.5"));
+        let font_dict = dictionary! {
+            "Type" => Object::Name(b"Font".to_vec()),
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"Helvetica".to_vec()),
+            "Encoding" => Object::Name(b"WinAnsiEncoding".to_vec()),
+            "FirstChar" => Object::Integer(32),
+            "Widths" => Object::Array(
+                (0..224).map(|i| Object::Integer(500 + i)).collect()
+            )
+        };
+        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+
+        let mut fonts = HashMap::new();
+        fonts.insert(b"F1".to_vec(), font);
+
         let mut engine = StreamEngine::new(doc);
+        engine.set_fonts(fonts);
 
         engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TM,
+                &[
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(1),
+                    Object::Integer(100),
+                    Object::Integer(700),
+                ],
+            )
+            .unwrap();
         engine
             .process_operator(
                 TF,
@@ -584,17 +750,91 @@ mod tests {
             )
             .unwrap();
 
-        // TJ with adjustments: [("He") -120 ("llo")]
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"AB".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(engine.text_positions().len(), 2);
+        // First char 'A' (code 65) decoded via WinAnsiEncoding
+        assert_eq!(engine.text_positions()[0].unicode, "A");
+        assert_eq!(engine.text_positions()[0].font_size, 12.0);
+        assert!((engine.text_positions()[0].x() - 100.0).abs() < 0.001);
+        assert!((engine.text_positions()[0].y() - 700.0).abs() < 0.001);
+
+        // Second char 'B' should be offset by first char's advance
+        assert_eq!(engine.text_positions()[1].unicode, "B");
+        // 'A' has code 65, first_char=32, so width index = 33, width = 500+33 = 533
+        // advance = (533/1000 * 12 + 0 + 0) * 1.0 = 6.396
+        let expected_x = 100.0 + (533.0 / 1000.0) * 12.0;
+        assert!(
+            (engine.text_positions()[1].x() - expected_x).abs() < 0.01,
+            "expected x={}, got x={}",
+            expected_x,
+            engine.text_positions()[1].x()
+        );
+    }
+
+    #[test]
+    fn test_tj_array_with_font() {
+        use crate::font::simple_font::SimpleFont;
+        use lopdf::dictionary;
+
+        let doc = Arc::new(Document::with_version("1.5"));
+        let font_dict = dictionary! {
+            "Type" => Object::Name(b"Font".to_vec()),
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"Helvetica".to_vec()),
+            "Encoding" => Object::Name(b"WinAnsiEncoding".to_vec()),
+            "FirstChar" => Object::Integer(32),
+            "Widths" => Object::Array(
+                (0..224).map(|_| Object::Integer(600)).collect()
+            )
+        };
+        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+
+        let mut fonts = HashMap::new();
+        fonts.insert(b"F1".to_vec(), font);
+
+        let mut engine = StreamEngine::new(doc);
+        engine.set_fonts(fonts);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(10)],
+            )
+            .unwrap();
+
+        // TJ: [("A") -500 ("B")]
+        // The -500 adjustment should move text position by +500/1000 * 10 * 1.0 = +5.0 units
         let arr = Object::Array(vec![
-            Object::String(b"He".to_vec(), lopdf::StringFormat::Literal),
-            Object::Integer(-120),
-            Object::String(b"llo".to_vec(), lopdf::StringFormat::Literal),
+            Object::String(b"A".to_vec(), lopdf::StringFormat::Literal),
+            Object::Integer(-500),
+            Object::String(b"B".to_vec(), lopdf::StringFormat::Literal),
         ]);
         engine.process_operator(TJ_UPPER, &[arr]).unwrap();
 
-        assert_eq!(engine.text_segments().len(), 2);
-        assert_eq!(engine.text_segments()[0].bytes, b"He");
-        assert_eq!(engine.text_segments()[1].bytes, b"llo");
+        assert_eq!(engine.text_positions().len(), 2);
+        assert_eq!(engine.text_positions()[0].unicode, "A");
+        assert_eq!(engine.text_positions()[1].unicode, "B");
+
+        // 'A' starts at x=0 (identity matrix)
+        // 'A' advance = 600/1000 * 10 = 6.0
+        // TJ adjustment = -(-500)/1000 * 10 = +5.0
+        // 'B' starts at x = 6.0 + 5.0 = 11.0
+        let b_x = engine.text_positions()[1].x();
+        assert!(
+            (b_x - 11.0).abs() < 0.01,
+            "expected B at x=11.0, got x={}",
+            b_x
+        );
     }
 
     #[test]
@@ -627,7 +867,6 @@ mod tests {
         let doc = Arc::new(Document::with_version("1.5"));
         let mut engine = StreamEngine::new(doc);
 
-        // cm with translation
         engine
             .process_operator(
                 CM,
@@ -645,5 +884,91 @@ mod tests {
         let ctm = &engine.state_stack.current().ctm;
         assert!((ctm.translate_x() - 100.0).abs() < 0.001);
         assert!((ctm.translate_y() - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_text_matrix_advances() {
+        // Verify text matrix advances correctly after each glyph
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(10)],
+            )
+            .unwrap();
+
+        // Show "ABC" without font — each byte advances by 0 (no width info)
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"ABC".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        // Without a font, width is 0, so all positions should be at x=0
+        assert_eq!(engine.text_positions().len(), 3);
+        assert!((engine.text_positions()[0].x() - 0.0).abs() < 0.001);
+        assert!((engine.text_positions()[1].x() - 0.0).abs() < 0.001);
+        assert!((engine.text_positions()[2].x() - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_word_spacing() {
+        use crate::font::simple_font::SimpleFont;
+        use lopdf::dictionary;
+
+        let doc = Arc::new(Document::with_version("1.5"));
+        let font_dict = dictionary! {
+            "Type" => Object::Name(b"Font".to_vec()),
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"Helvetica".to_vec()),
+            "Encoding" => Object::Name(b"WinAnsiEncoding".to_vec()),
+            "FirstChar" => Object::Integer(32),
+            "Widths" => Object::Array(
+                (0..224).map(|_| Object::Integer(500)).collect()
+            )
+        };
+        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+
+        let mut fonts = HashMap::new();
+        fonts.insert(b"F1".to_vec(), font);
+
+        let mut engine = StreamEngine::new(doc);
+        engine.set_fonts(fonts);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(10)],
+            )
+            .unwrap();
+        // Set word spacing = 5.0
+        engine
+            .process_operator(TW, &[Object::Real(5.0)])
+            .unwrap();
+
+        // "A B" — space at code 32 should get extra word spacing
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"A B".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        // 'A' at x=0, advance = 500/1000 * 10 = 5.0
+        // ' ' at x=5.0, advance = (500/1000 * 10 + 0 + 5.0) * 1.0 = 10.0
+        // 'B' at x=15.0
+        assert_eq!(engine.text_positions().len(), 3);
+        assert!((engine.text_positions()[2].x() - 15.0).abs() < 0.1);
     }
 }

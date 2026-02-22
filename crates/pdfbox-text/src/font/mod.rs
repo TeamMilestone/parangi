@@ -79,6 +79,22 @@ impl PdfFont {
         }
     }
 
+    /// Read a character code from the byte stream at the given offset.
+    /// Returns (code, bytes_consumed). For simple/Type3 fonts this is always
+    /// 1 byte; for Type0 fonts it depends on the encoding CMap codespace ranges.
+    pub fn read_code(&self, data: &[u8], offset: usize) -> (u32, usize) {
+        match self {
+            PdfFont::Simple(_) | PdfFont::Type3(_) => {
+                if offset < data.len() {
+                    (data[offset] as u32, 1)
+                } else {
+                    (0, 0)
+                }
+            }
+            PdfFont::Type0(f) => f.read_code(data, offset),
+        }
+    }
+
     /// Whether this font can decode character codes.
     pub fn is_stub(&self) -> bool {
         false

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use super::comparator::sort_positions;
+use super::normalizer;
 use super::TextPosition;
 
 /// List item patterns for paragraph detection.
@@ -96,6 +97,19 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
 
     // Remove spaces that are contained within other characters
     remove_contained_spaces(positions);
+
+    // Merge combining diacritical marks with preceding characters
+    {
+        let mut unicode_values: Vec<String> =
+            positions.iter().map(|p| p.unicode.clone()).collect();
+        if normalizer::merge_diacritics(&mut unicode_values) {
+            // Apply merged values back and remove empty positions
+            for (i, val) in unicode_values.into_iter().enumerate() {
+                positions[i].unicode = val;
+            }
+            positions.retain(|p| !p.unicode.is_empty());
+        }
+    }
 
     let mut output = String::new();
     let mut line = Vec::<&TextPosition>::new();
@@ -224,7 +238,8 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
         flush_line(&line, &mut output, pending_word_separator, config);
     }
 
-    output
+    // Apply Unicode normalization (NFC + ligature decomposition)
+    normalizer::normalize_text(&output)
 }
 
 /// Write a line of TextPositions to the output, inserting word separators

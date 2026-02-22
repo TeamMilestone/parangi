@@ -42,3 +42,5 @@ pub const GS: &str = "gs"; // Set graphics state from ExtGState
 pub const BMC: &str = "BMC"; // Begin marked content
 pub const BDC: &str = "BDC"; // Begin marked content with properties
 pub const EMC: &str = "EMC"; // End marked content
+pub const MP: &str = "MP"; // Marked content point
+pub const DP: &str = "DP"; // Marked content point with properties

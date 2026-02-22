@@ -18,6 +18,16 @@ use crate::font::PdfFont;
 use crate::text::TextPosition;
 use crate::{PdfError, Result};
 
+/// A marked content entry on the stack (for BMC/BDC/EMC tracking).
+#[derive(Debug)]
+struct MarkedContentEntry {
+    /// The tag name (e.g. "Span", "P", "Artifact").
+    #[allow(dead_code)]
+    tag: String,
+    /// The ActualText value from properties, if present.
+    actual_text: Option<String>,
+}
+
 /// Pre-extracted Form XObject data (avoids borrow conflicts).
 struct FormData {
     content_bytes: Vec<u8>,
@@ -50,6 +60,13 @@ pub struct StreamEngine {
 
     /// Recursion depth for Form XObject nesting.
     nesting_level: u32,
+
+    /// Stack of marked content entries (BMC/BDC push, EMC pop).
+    marked_content_stack: Vec<MarkedContentEntry>,
+    /// Current ActualText replacement (from innermost BDC with ActualText).
+    actual_text: Option<String>,
+    /// Whether we're still waiting for the first TextPosition within an ActualText span.
+    first_actual_text_position: bool,
 }
 
 impl StreamEngine {
@@ -65,6 +82,9 @@ impl StreamEngine {
             page_width: 612.0,
             page_height: 792.0,
             nesting_level: 0,
+            marked_content_stack: Vec::new(),
+            actual_text: None,
+            first_actual_text_position: false,
         }
     }
 
@@ -153,8 +173,11 @@ impl StreamEngine {
             // XObject (Form XObject processing)
             DO => self.op_do(operands),
 
-            // Marked content (placeholder — full implementation in iter 12)
-            BMC | BDC | EMC => Ok(()),
+            // Marked content
+            BMC => self.op_bmc(operands),
+            BDC => self.op_bdc(operands),
+            EMC => self.op_emc(),
+            MP | DP => Ok(()), // Marked content points: no-op for text extraction
 
             // All other operators: ignore (not needed for text extraction)
             _ => Ok(()),
@@ -653,6 +676,116 @@ impl StreamEngine {
         refs
     }
 
+    // === Marked content operators (BMC/BDC/EMC) ===
+
+    /// BMC: Begin marked content (tag only, no properties).
+    fn op_bmc(&mut self, operands: &[Object]) -> Result<()> {
+        let tag = if let Some(Object::Name(n)) = operands.first() {
+            name_to_string(n)
+        } else {
+            String::new()
+        };
+        self.marked_content_stack.push(MarkedContentEntry {
+            tag,
+            actual_text: None,
+        });
+        Ok(())
+    }
+
+    /// BDC: Begin marked content with properties dict.
+    /// Extracts ActualText from properties if present.
+    fn op_bdc(&mut self, operands: &[Object]) -> Result<()> {
+        let tag = if let Some(Object::Name(n)) = operands.first() {
+            name_to_string(n)
+        } else {
+            String::new()
+        };
+
+        // Extract properties dictionary (inline or referenced)
+        let actual_text = self.extract_actual_text(operands);
+
+        let entry = MarkedContentEntry {
+            tag,
+            actual_text: actual_text.clone(),
+        };
+        self.marked_content_stack.push(entry);
+
+        // If this BDC has ActualText, activate it
+        if let Some(text) = actual_text {
+            // Remove soft hyphens (U+00AD), matching PDFBox behavior
+            let cleaned = text.replace('\u{00ad}', "");
+            self.actual_text = Some(cleaned);
+            self.first_actual_text_position = true;
+        }
+
+        Ok(())
+    }
+
+    /// EMC: End marked content.
+    fn op_emc(&mut self) -> Result<()> {
+        if let Some(entry) = self.marked_content_stack.pop() {
+            // If this entry had ActualText, clear it
+            if entry.actual_text.is_some() {
+                self.actual_text = None;
+                self.first_actual_text_position = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract ActualText from BDC operands.
+    /// Operands are [tag_name, properties_dict_or_name].
+    fn extract_actual_text(&self, operands: &[Object]) -> Option<String> {
+        if operands.len() < 2 {
+            return None;
+        }
+
+        let props = match &operands[1] {
+            Object::Dictionary(d) => d,
+            Object::Name(name) => {
+                // Properties referenced by name from page's Properties resource
+                // For now, skip property resource lookup (rare in practice)
+                log::debug!(
+                    "BDC properties reference: {:?}",
+                    String::from_utf8_lossy(name)
+                );
+                return None;
+            }
+            Object::Reference(id) => {
+                // Resolve indirect reference
+                match self.doc.get_object(*id) {
+                    Ok(Object::Dictionary(d)) => d,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+
+        // Look for /ActualText in properties
+        match props.get(b"ActualText") {
+            Ok(Object::String(bytes, _format)) => {
+                // Try UTF-16BE first (starts with BOM FE FF)
+                if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+                    let utf16: Vec<u16> = bytes[2..]
+                        .chunks(2)
+                        .map(|chunk| {
+                            if chunk.len() == 2 {
+                                u16::from_be_bytes([chunk[0], chunk[1]])
+                            } else {
+                                0
+                            }
+                        })
+                        .collect();
+                    String::from_utf16(&utf16).ok()
+                } else {
+                    // PDFDocEncoding (roughly Latin-1 for most chars)
+                    Some(bytes.iter().map(|&b| b as char).collect())
+                }
+            }
+            _ => None,
+        }
+    }
+
     // === Text processing (showText / showGlyph port) ===
 
     /// Process a text string byte-by-byte, creating TextPosition for each glyph.
@@ -761,10 +894,24 @@ impl StreamEngine {
             let tm_ref = self.state_stack.current().text_matrix.as_ref().unwrap();
             let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
 
+            // --- Apply ActualText replacement if active ---
+            let final_unicode = if self.actual_text.is_some() {
+                if self.first_actual_text_position {
+                    // First glyph in ActualText span: use the ActualText value
+                    self.first_actual_text_position = false;
+                    self.actual_text.clone().unwrap_or_default()
+                } else {
+                    // Subsequent glyphs in ActualText span: suppress (empty string)
+                    String::new()
+                }
+            } else {
+                unicode
+            };
+
             // --- Create TextPosition ---
-            if !unicode.is_empty() {
+            if !final_unicode.is_empty() {
                 let tp = TextPosition {
-                    unicode,
+                    unicode: final_unicode,
                     char_codes: vec![code],
                     text_matrix: trm,
                     end_x,
@@ -1252,5 +1399,306 @@ mod tests {
         // 'B' at x=15.0
         assert_eq!(engine.text_positions().len(), 3);
         assert!((engine.text_positions()[2].x() - 15.0).abs() < 0.1);
+    }
+
+    // === Marked content tests ===
+
+    #[test]
+    fn test_bmc_emc_no_effect_on_text() {
+        // BMC/EMC without ActualText should not affect text extraction
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        // BMC /Span
+        engine
+            .process_operator(BMC, &[Object::Name(b"Span".to_vec())])
+            .unwrap();
+
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"ABC".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap();
+
+        // All three characters should appear normally
+        assert_eq!(engine.text_positions().len(), 3);
+        assert_eq!(engine.text_positions()[0].unicode, "A");
+        assert_eq!(engine.text_positions()[1].unicode, "B");
+        assert_eq!(engine.text_positions()[2].unicode, "C");
+    }
+
+    #[test]
+    fn test_bdc_actual_text_replaces_glyphs() {
+        // BDC with ActualText should replace glyph text
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        // BDC /Span << /ActualText (fi) >>
+        let props = lopdf::Dictionary::from_iter(vec![(
+            b"ActualText".to_vec(),
+            Object::String(b"fi".to_vec(), lopdf::StringFormat::Literal),
+        )]);
+        engine
+            .process_operator(
+                BDC,
+                &[
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            )
+            .unwrap();
+
+        // Content stream has 2 glyphs representing the ligature
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"\x01\x02".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap();
+
+        // Only one TextPosition should be produced, with "fi" as unicode
+        assert_eq!(engine.text_positions().len(), 1);
+        assert_eq!(engine.text_positions()[0].unicode, "fi");
+    }
+
+    #[test]
+    fn test_bdc_actual_text_utf16be() {
+        // BDC with UTF-16BE ActualText
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        // UTF-16BE encoded "가" (U+AC00): FE FF AC 00
+        let utf16_bytes = vec![0xFE, 0xFF, 0xAC, 0x00];
+        let props = lopdf::Dictionary::from_iter(vec![(
+            b"ActualText".to_vec(),
+            Object::String(utf16_bytes, lopdf::StringFormat::Hexadecimal),
+        )]);
+        engine
+            .process_operator(
+                BDC,
+                &[
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            )
+            .unwrap();
+
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"\x01".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap();
+
+        assert_eq!(engine.text_positions().len(), 1);
+        assert_eq!(engine.text_positions()[0].unicode, "가");
+    }
+
+    #[test]
+    fn test_bdc_actual_text_soft_hyphen_removed() {
+        // Soft hyphens (U+00AD) in ActualText should be removed
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        // "a\u{00AD}b" in Latin-1 encoding (00AD = soft hyphen)
+        let text_bytes = vec![b'a', 0xAD, b'b'];
+        let props = lopdf::Dictionary::from_iter(vec![(
+            b"ActualText".to_vec(),
+            Object::String(text_bytes, lopdf::StringFormat::Literal),
+        )]);
+        engine
+            .process_operator(
+                BDC,
+                &[
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            )
+            .unwrap();
+
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"\x01".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap();
+
+        assert_eq!(engine.text_positions().len(), 1);
+        assert_eq!(engine.text_positions()[0].unicode, "ab");
+    }
+
+    #[test]
+    fn test_nested_marked_content() {
+        // Nested BMC/BDC blocks should work correctly
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        // Outer BMC /P (no ActualText)
+        engine
+            .process_operator(BMC, &[Object::Name(b"P".to_vec())])
+            .unwrap();
+
+        // Show "A" — should appear normally
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"A".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        // Inner BDC with ActualText
+        let props = lopdf::Dictionary::from_iter(vec![(
+            b"ActualText".to_vec(),
+            Object::String(b"XY".to_vec(), lopdf::StringFormat::Literal),
+        )]);
+        engine
+            .process_operator(
+                BDC,
+                &[
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            )
+            .unwrap();
+
+        // Show 3 glyphs — only first should produce TextPosition with "XY"
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"\x01\x02\x03".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap(); // End inner BDC
+
+        // Show "B" — back to normal (outer BMC has no ActualText)
+        engine
+            .process_operator(
+                TJ_LOWER,
+                &[Object::String(
+                    b"B".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
+            )
+            .unwrap();
+
+        engine.process_operator(EMC, &[]).unwrap(); // End outer BMC
+
+        // Expect: "A", "XY", "B"
+        assert_eq!(engine.text_positions().len(), 3);
+        assert_eq!(engine.text_positions()[0].unicode, "A");
+        assert_eq!(engine.text_positions()[1].unicode, "XY");
+        assert_eq!(engine.text_positions()[2].unicode, "B");
+    }
+
+    #[test]
+    fn test_emc_without_bmc_is_safe() {
+        // EMC without matching BMC should not panic
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+        engine.process_operator(EMC, &[]).unwrap();
+        // Should just be a no-op
+    }
+
+    #[test]
+    fn test_actual_text_with_no_glyphs() {
+        // ActualText with no glyphs inside should not produce TextPositions
+        let doc = Arc::new(Document::with_version("1.5"));
+        let mut engine = StreamEngine::new(doc);
+
+        engine.process_operator(BT, &[]).unwrap();
+        engine
+            .process_operator(
+                TF,
+                &[Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            )
+            .unwrap();
+
+        let props = lopdf::Dictionary::from_iter(vec![(
+            b"ActualText".to_vec(),
+            Object::String(b"phantom".to_vec(), lopdf::StringFormat::Literal),
+        )]);
+        engine
+            .process_operator(
+                BDC,
+                &[
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            )
+            .unwrap();
+
+        // No text operators inside BDC/EMC
+        engine.process_operator(EMC, &[]).unwrap();
+
+        // No TextPositions should be produced
+        assert!(engine.text_positions().is_empty());
     }
 }

@@ -3,6 +3,8 @@
 //! Ported from org.apache.pdfbox.text.PDFTextStripper.
 //! Handles word boundary detection, line detection, and paragraph separation.
 
+use std::collections::HashMap;
+
 use super::comparator::sort_positions;
 use super::TextPosition;
 
@@ -36,6 +38,9 @@ pub struct StripperConfig {
     /// Page separator string.
     /// Default: "\n".
     pub page_separator: String,
+    /// Whether to suppress duplicate overlapping text.
+    /// Default: true.
+    pub suppress_duplicates: bool,
 }
 
 impl Default for StripperConfig {
@@ -50,6 +55,7 @@ impl Default for StripperConfig {
             line_separator: "\n".to_string(),
             paragraph_separator: "\n".to_string(),
             page_separator: "\n".to_string(),
+            suppress_duplicates: true,
         }
     }
 }
@@ -67,6 +73,14 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
     if config.sort_by_position {
         sort_positions(positions);
     }
+
+    // Remove duplicate overlapping text
+    if config.suppress_duplicates {
+        suppress_duplicate_positions(positions);
+    }
+
+    // Remove spaces that are contained within other characters
+    remove_contained_spaces(positions);
 
     let mut output = String::new();
     let mut line = Vec::<&TextPosition>::new();
@@ -254,6 +268,118 @@ fn flush_line(
     }
 }
 
+/// Suppress duplicate overlapping text positions.
+///
+/// Ported from PDFTextStripper.processTextPosition() duplicate suppression.
+/// When the same character appears at the same position (within a tolerance
+/// of 1/3 character width), only the first occurrence is kept.
+/// This handles PDFs that overlay text for bold/shadow effects.
+fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
+    if positions.len() < 2 {
+        return;
+    }
+
+    // Map: character → list of (x, y) positions seen
+    let mut seen: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
+    let mut keep = vec![true; positions.len()];
+
+    for (i, pos) in positions.iter().enumerate() {
+        if pos.unicode.is_empty() {
+            continue;
+        }
+
+        let tolerance = if pos.unicode.len() > 0 {
+            pos.individual_width.abs() / pos.unicode.len().max(1) as f32 / 3.0
+        } else {
+            0.0
+        };
+
+        if tolerance <= 0.0 {
+            continue;
+        }
+
+        let x = pos.x();
+        let y = pos.y();
+
+        let positions_for_char = seen.entry(pos.unicode.clone()).or_default();
+
+        // Check if any existing position is within tolerance
+        let is_duplicate = positions_for_char.iter().any(|&(px, py)| {
+            (x - px).abs() < tolerance && (y - py).abs() < tolerance
+        });
+
+        if is_duplicate {
+            keep[i] = false;
+        } else {
+            positions_for_char.push((x, y));
+        }
+    }
+
+    // Remove duplicates (iterate in reverse to preserve indices)
+    let mut i = positions.len();
+    while i > 0 {
+        i -= 1;
+        if !keep[i] {
+            positions.remove(i);
+        }
+    }
+}
+
+/// Remove space characters whose X range is contained within another character.
+///
+/// Ported from PDFTextStripper.removeContainedSpaces().
+/// This handles cases where PDF producers insert space characters that overlap
+/// with adjacent characters, creating unwanted gaps.
+fn remove_contained_spaces(positions: &mut Vec<TextPosition>) {
+    if positions.len() < 2 {
+        return;
+    }
+
+    let mut remove_indices = Vec::new();
+
+    for i in 0..positions.len() {
+        if positions[i].unicode != " " {
+            continue;
+        }
+
+        let space_x = positions[i].x_dir_adj();
+        let space_end_x = space_x + positions[i].width_dir_adj();
+        let space_y = positions[i].y_dir_adj();
+        let space_height = positions[i].height_dir_adj();
+
+        // Check if this space is contained within a neighboring character
+        for j in (i.saturating_sub(5))..((i + 6).min(positions.len())) {
+            if i == j || positions[j].unicode == " " {
+                continue;
+            }
+
+            // Must be on the same line
+            if !overlap(
+                space_y,
+                space_height,
+                positions[j].y_dir_adj(),
+                positions[j].height_dir_adj(),
+            ) {
+                continue;
+            }
+
+            let char_x = positions[j].x_dir_adj();
+            let char_end_x = char_x + positions[j].width_dir_adj();
+
+            // Space is contained if its X range falls entirely within the character's X range
+            if space_x >= char_x && space_end_x <= char_end_x {
+                remove_indices.push(i);
+                break;
+            }
+        }
+    }
+
+    // Remove in reverse order
+    for &i in remove_indices.iter().rev() {
+        positions.remove(i);
+    }
+}
+
 /// Check if two vertical ranges overlap (same line detection).
 ///
 /// Returns true if the Y/height ranges overlap or are within 0.1pt tolerance.
@@ -408,6 +534,50 @@ mod tests {
         ];
         let text = assemble_text(&mut positions, &config);
         assert_eq!(text, "안녕하세요");
+    }
+
+    #[test]
+    fn test_duplicate_suppression() {
+        let config = StripperConfig {
+            suppress_duplicates: true,
+            ..Default::default()
+        };
+        // Same character "A" at the same position (bold shadow effect)
+        let mut positions = vec![
+            make_tp("A", 100.0, 700.0, 7.0, 12.0, 4.0),
+            make_tp("A", 100.1, 700.0, 7.0, 12.0, 4.0), // Duplicate (0.1pt offset)
+            make_tp("B", 107.0, 700.0, 7.0, 12.0, 4.0),
+        ];
+        let text = assemble_text(&mut positions, &config);
+        assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn test_duplicate_suppression_different_chars() {
+        let config = StripperConfig {
+            suppress_duplicates: true,
+            ..Default::default()
+        };
+        // Different characters at the same position should NOT be suppressed
+        let mut positions = vec![
+            make_tp("A", 100.0, 700.0, 7.0, 12.0, 4.0),
+            make_tp("B", 100.0, 700.0, 7.0, 12.0, 4.0), // Different char
+        ];
+        let text = assemble_text(&mut positions, &config);
+        assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn test_contained_space_removal() {
+        let config = StripperConfig::default();
+        // A wide character with a space contained entirely within it
+        let mut positions = vec![
+            make_tp("W", 100.0, 700.0, 14.0, 12.0, 4.0), // Wide char: 100-114
+            make_tp(" ", 104.0, 700.0, 3.0, 12.0, 4.0),   // Space: 104-107 (inside W)
+            make_tp("x", 114.0, 700.0, 6.0, 12.0, 4.0),
+        ];
+        let text = assemble_text(&mut positions, &config);
+        assert_eq!(text, "Wx");
     }
 
     #[test]

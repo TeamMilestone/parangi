@@ -100,6 +100,32 @@ pub fn extract_text_with_config(
     Ok(output)
 }
 
+/// Result of extracting text from a single PDF file in a batch.
+pub struct BatchResult {
+    /// The path of the processed file.
+    pub path: std::path::PathBuf,
+    /// The extracted text, or an error.
+    pub result: Result<String>,
+}
+
+/// Extract text from multiple PDF files in parallel.
+///
+/// Uses rayon for file-level parallelism. Each file internally uses
+/// page-level parallelism, creating nested parallelism (file × page).
+/// Rayon's work-stealing scheduler handles the nested parallelism efficiently.
+pub fn extract_text_batch(
+    paths: &[std::path::PathBuf],
+    config: &StripperConfig,
+) -> Vec<BatchResult> {
+    paths
+        .par_iter()
+        .map(|path| BatchResult {
+            path: path.clone(),
+            result: extract_text_with_config(path, config),
+        })
+        .collect()
+}
+
 /// Extract all text from a PDF file sequentially (single-threaded).
 ///
 /// Useful for debugging or when parallelism is not desired.

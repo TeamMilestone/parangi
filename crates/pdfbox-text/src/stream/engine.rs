@@ -112,16 +112,207 @@ impl StreamEngine {
             return Ok(());
         }
 
-        let content = Content::decode(content_bytes)
-            .map_err(|e| PdfError::Parse(format!("content decode: {}", e)))?;
+        let has_nul = content_bytes.contains(&0u8);
 
-        for op in &content.operations {
+        if !has_nul {
+            // Fast path: no NUL bytes, try direct decode then strip inline images
+            if let Ok(content) = Content::decode(content_bytes) {
+                return self.process_operations(&content.operations);
+            }
+            let cleaned = Self::strip_unparseable_content(content_bytes);
+            if let Ok(content) = Content::decode(&cleaned) {
+                return self.process_operations(&content.operations);
+            }
+            return Err(PdfError::Parse(
+                "content decode: invalid content stream".into(),
+            ));
+        }
+
+        // Content has NUL bytes. lopdf's Content::decode may silently truncate
+        // at NUL positions, so we must clean the content first.
+
+        // Try 1: strip inline images and NUL bytes, then decode
+        let cleaned = Self::strip_unparseable_content(content_bytes);
+        if let Ok(content) = Content::decode(&cleaned) {
+            return self.process_operations(&content.operations);
+        }
+
+        // Try 2: split on NUL runs and decode each chunk independently
+        self.process_chunks(content_bytes)
+    }
+
+    /// Process decoded operations.
+    fn process_operations(
+        &mut self,
+        operations: &[lopdf::content::Operation],
+    ) -> Result<()> {
+        for op in operations {
             if let Err(e) = self.process_operator(&op.operator, &op.operands) {
                 log::warn!("operator '{}' error: {}", op.operator, e);
             }
         }
-
         Ok(())
+    }
+
+    /// Strip inline images (BI...ID...EI) and NUL bytes from content streams.
+    ///
+    /// lopdf's Content::decode cannot parse inline image data (binary content
+    /// between ID and EI operators). Since we only need text operators, we can
+    /// safely remove inline images. NUL byte padding from HWP→PDF converters
+    /// is also stripped — but NUL bytes inside parenthesized string literals
+    /// `(...)` are preserved, as they may be valid CID character codes.
+    fn strip_unparseable_content(content_bytes: &[u8]) -> Vec<u8> {
+        let mut result = Vec::with_capacity(content_bytes.len());
+        let mut i = 0;
+        let mut paren_depth = 0u32;
+
+        while i < content_bytes.len() {
+            let b = content_bytes[i];
+
+            // Track parenthesized string literal depth (handling escapes)
+            if paren_depth > 0 {
+                // Inside a string literal: keep everything including NUL
+                result.push(b);
+                if b == b'\\' {
+                    // Escape sequence: copy next byte too
+                    i += 1;
+                    if i < content_bytes.len() {
+                        result.push(content_bytes[i]);
+                    }
+                } else if b == b'(' {
+                    paren_depth += 1;
+                } else if b == b')' {
+                    paren_depth -= 1;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Outside string literals
+            if b == b'(' {
+                paren_depth = 1;
+                result.push(b);
+                i += 1;
+                continue;
+            }
+
+            // Skip NUL bytes outside strings
+            if b == 0 {
+                i += 1;
+                continue;
+            }
+
+            // Check for BI (Begin Inline Image) operator
+            if i + 2 < content_bytes.len()
+                && b == b'B'
+                && content_bytes[i + 1] == b'I'
+                && (i == 0 || content_bytes[i - 1].is_ascii_whitespace())
+                && content_bytes[i + 2].is_ascii_whitespace()
+            {
+                if let Some(ei_pos) = Self::find_ei(&content_bytes[i..]) {
+                    i += ei_pos;
+                    if i < content_bytes.len() && content_bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+
+            result.push(b);
+            i += 1;
+        }
+
+        result
+    }
+
+    /// Find the position after EI (End Inline Image) in the given slice.
+    /// Returns the offset past "EI\n" or "EI " relative to the start of the slice.
+    fn find_ei(data: &[u8]) -> Option<usize> {
+        // Skip past BI
+        let mut i = 2;
+        // Find ID (Image Data) marker
+        while i + 2 < data.len() {
+            if data[i] == b'I'
+                && data[i + 1] == b'D'
+                && (i == 0 || data[i - 1].is_ascii_whitespace())
+                && data[i + 2].is_ascii_whitespace()
+            {
+                // Skip past ID + whitespace + binary data
+                i += 3; // past "ID "
+                // Now scan for EI preceded by whitespace
+                while i + 2 < data.len() {
+                    if data[i] == b'E'
+                        && data[i + 1] == b'I'
+                        && data[i - 1].is_ascii_whitespace()
+                        && (i + 2 >= data.len() || data[i + 2].is_ascii_whitespace())
+                    {
+                        return Some(i + 2);
+                    }
+                    i += 1;
+                }
+                // No EI found — skip to end
+                return Some(data.len());
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Split content on NUL byte runs and decode each chunk independently.
+    fn process_chunks(&mut self, content_bytes: &[u8]) -> Result<()> {
+        let mut processed_any = false;
+        let mut start = 0;
+
+        while start < content_bytes.len() {
+            // Skip NUL bytes
+            if content_bytes[start] == 0 {
+                start += 1;
+                continue;
+            }
+
+            // Find end of non-NUL chunk (stop at runs of 3+ NUL bytes)
+            let mut end = start + 1;
+            while end < content_bytes.len() {
+                if content_bytes[end] == 0 {
+                    let nul_run = content_bytes[end..]
+                        .iter()
+                        .take_while(|&&b| b == 0)
+                        .count();
+                    if nul_run >= 3 {
+                        break;
+                    }
+                    end += nul_run;
+                } else {
+                    end += 1;
+                }
+            }
+
+            let chunk = &content_bytes[start..end];
+            if !chunk.is_empty() {
+                // Try direct decode, then with inline image stripping
+                let content = Content::decode(chunk).or_else(|_| {
+                    let cleaned = Self::strip_unparseable_content(chunk);
+                    Content::decode(&cleaned)
+                });
+                if let Ok(content) = content {
+                    for op in &content.operations {
+                        if let Err(e) = self.process_operator(&op.operator, &op.operands) {
+                            log::warn!("operator '{}' error: {}", op.operator, e);
+                        }
+                    }
+                    processed_any = true;
+                }
+            }
+            start = end;
+        }
+
+        if processed_any {
+            Ok(())
+        } else {
+            Err(PdfError::Parse(
+                "content decode: no valid chunks found".into(),
+            ))
+        }
     }
 
     /// Get the collected text positions.

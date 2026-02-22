@@ -152,7 +152,9 @@ pub fn extract_text_sequential(
         if let Some(ref res) = resources {
             engine.load_resources(res.dictionary());
         }
-        engine.process_content(&content_bytes)?;
+        if engine.process_content(&content_bytes).is_err() {
+            continue;
+        }
 
         let mut positions = engine.into_text_positions();
         if positions.is_empty() {

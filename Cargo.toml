@@ -12,7 +12,7 @@ license = "Apache-2.0"
 rust-version = "1.75"
 
 [workspace.dependencies]
-lopdf = "0.35"
+lopdf = "0.39"
 rayon = "1.10"
 memmap2 = "0.9"
 encoding_rs = "0.8"

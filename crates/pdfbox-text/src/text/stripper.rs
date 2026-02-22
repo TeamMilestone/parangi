@@ -183,7 +183,7 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
                     (word_spacing + last_word_spacing) / 2.0 * config.spacing_tolerance
                 };
 
-                let char_count = pos.unicode.len().max(1) as f32;
+                let char_count = pos.unicode.chars().count().max(1) as f32;
                 let ave_char_width = if previous_ave_char_width < 0.0 {
                     pos_width / char_count
                 } else {
@@ -259,6 +259,7 @@ fn flush_line(
     let mut last_word_spacing: f32 = -1.0;
     let mut previous_ave_char_width: f32 = -1.0;
     let mut first = true;
+    let mut last_unicode: &str = "";
 
     for pos in line {
         let pos_x = pos.x_dir_adj();
@@ -270,22 +271,25 @@ fn flush_line(
             let delta_space = if word_spacing <= 0.0 || word_spacing.is_nan() {
                 f32::MAX
             } else if last_word_spacing < 0.0 {
-                word_spacing * 0.5
+                word_spacing * config.spacing_tolerance
             } else {
-                (word_spacing + last_word_spacing) / 2.0 * 0.5
+                (word_spacing + last_word_spacing) / 2.0 * config.spacing_tolerance
             };
 
-            let char_count = pos.unicode.len().max(1) as f32;
+            let char_count = pos.unicode.chars().count().max(1) as f32;
             let ave_char_width = if previous_ave_char_width < 0.0 {
                 pos_width / char_count
             } else {
                 (previous_ave_char_width + pos_width / char_count) / 2.0
             };
-            let delta_char = ave_char_width * 0.3;
+            let delta_char = ave_char_width * config.average_char_tolerance;
 
             let expected_x = prev_end_x + delta_space.min(delta_char);
 
-            if prev_end_x > f32::MIN && expected_x < pos_x {
+            if prev_end_x > f32::MIN
+                && expected_x < pos_x
+                && !last_unicode.ends_with(&*config.word_separator)
+            {
                 output.push_str(&config.word_separator);
             }
 
@@ -295,6 +299,7 @@ fn flush_line(
         output.push_str(&pos.unicode);
         prev_end_x = pos_x + pos_width;
         last_word_spacing = word_spacing;
+        last_unicode = &pos.unicode;
         first = false;
     }
 }
@@ -437,8 +442,8 @@ fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
             continue;
         }
 
-        let tolerance = if pos.unicode.len() > 0 {
-            pos.individual_width.abs() / pos.unicode.len().max(1) as f32 / 3.0
+        let tolerance = if !pos.unicode.is_empty() {
+            pos.individual_width.abs() / pos.unicode.chars().count().max(1) as f32 / 3.0
         } else {
             0.0
         };

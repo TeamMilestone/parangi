@@ -4,6 +4,7 @@
 
 pub mod simple_font;
 pub mod type0_font;
+pub mod type3_font;
 
 use lopdf::{Document, ObjectId};
 
@@ -11,6 +12,7 @@ use crate::cos_helpers::name_to_string;
 use crate::Result;
 use simple_font::SimpleFont;
 use type0_font::Type0Font;
+use type3_font::Type3Font;
 
 /// A PDF font that can decode character codes to Unicode text.
 pub enum PdfFont {
@@ -18,8 +20,8 @@ pub enum PdfFont {
     Simple(SimpleFont),
     /// Type0 (composite) fonts for CJK text.
     Type0(Type0Font),
-    /// Type3 fonts — to be implemented in pdf09.
-    Type3Stub,
+    /// Type3 user-defined fonts.
+    Type3(Type3Font),
 }
 
 impl PdfFont {
@@ -48,20 +50,23 @@ impl PdfFont {
                 Ok(PdfFont::Type0(font))
             }
             "Type3" => {
-                Ok(PdfFont::Type3Stub)
+                let font = Type3Font::from_dict(doc, font_dict)?;
+                Ok(PdfFont::Type3(font))
             }
-            _ => Ok(PdfFont::Type3Stub), // Unknown → stub
+            _ => {
+                // Unknown subtype — try as simple font
+                let font = SimpleFont::from_dict(doc, font_dict, &subtype)?;
+                Ok(PdfFont::Simple(font))
+            }
         }
     }
 
     /// Decode a single character code to a Unicode string.
-    ///
-    /// Returns None if no mapping can be determined.
     pub fn to_unicode(&self, code: u32) -> Option<String> {
         match self {
             PdfFont::Simple(f) => f.to_unicode(code),
             PdfFont::Type0(f) => f.to_unicode(code),
-            PdfFont::Type3Stub => None,
+            PdfFont::Type3(f) => f.to_unicode(code),
         }
     }
 
@@ -70,12 +75,21 @@ impl PdfFont {
         match self {
             PdfFont::Simple(f) => f.get_width(code),
             PdfFont::Type0(f) => f.get_width(code),
-            PdfFont::Type3Stub => 0.0,
+            PdfFont::Type3(f) => f.get_width(code),
         }
     }
 
-    /// Whether this is a stub (unimplemented font type).
+    /// Whether this font can decode character codes.
     pub fn is_stub(&self) -> bool {
-        matches!(self, PdfFont::Type3Stub)
+        false
+    }
+
+    /// Get the base font name.
+    pub fn base_font_name(&self) -> &str {
+        match self {
+            PdfFont::Simple(f) => f.base_font(),
+            PdfFont::Type0(f) => f.base_font(),
+            PdfFont::Type3(f) => f.base_font(),
+        }
     }
 }

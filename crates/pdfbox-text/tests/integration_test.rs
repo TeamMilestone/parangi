@@ -248,11 +248,6 @@ fn test_font_creation_and_decode() {
                     created_fonts += 1;
                     let font_name = String::from_utf8_lossy(name);
 
-                    if font.is_stub() {
-                        println!("Font {:?}: stub (composite/type3)", font_name);
-                        continue;
-                    }
-
                     // Try decoding some common codes
                     for code in 32..=126 {
                         if let Some(unicode) = font.to_unicode(code) {

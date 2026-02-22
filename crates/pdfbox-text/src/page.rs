@@ -70,38 +70,19 @@ impl PdfPage {
             Object::Array(arr) => {
                 let mut bytes = Vec::new();
                 for item in arr {
-                    let item = self.doc.deref(item)?;
-                    if let Object::Stream(stream) = item {
-                        let data = stream.decompressed_content().map_err(|e| {
-                            PdfError::Parse(format!("stream decompression failed: {}", e))
-                        })?;
-                        if !bytes.is_empty() {
-                            bytes.push(b'\n');
+                    match self.doc.get_stream_data(item) {
+                        Ok(data) => {
+                            if !bytes.is_empty() {
+                                bytes.push(b'\n');
+                            }
+                            bytes.extend_from_slice(&data);
                         }
-                        bytes.extend_from_slice(&data);
+                        Err(_) => {} // Skip non-stream items
                     }
                 }
                 Ok(bytes)
             }
-            Object::Stream(stream) => {
-                let data = stream.decompressed_content().map_err(|e| {
-                    PdfError::Parse(format!("stream decompression failed: {}", e))
-                })?;
-                Ok(data)
-            }
-            Object::Reference(id) => {
-                let obj = self.doc.get_object(*id).map_err(|e| {
-                    PdfError::Parse(format!("content ref {:?}: {}", id, e))
-                })?;
-                if let Object::Stream(stream) = obj {
-                    let data = stream.decompressed_content().map_err(|e| {
-                        PdfError::Parse(format!("stream decompression failed: {}", e))
-                    })?;
-                    Ok(data)
-                } else {
-                    Ok(Vec::new())
-                }
-            }
+            Object::Stream(_) | Object::Reference(_) => self.doc.get_stream_data(contents),
             _ => Ok(Vec::new()),
         }
     }

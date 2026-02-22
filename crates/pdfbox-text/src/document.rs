@@ -39,11 +39,13 @@ impl PdfDocument {
         Self::from_document(doc, None)
     }
 
-    fn from_document(doc: Document, mmap: Option<Mmap>) -> Result<Self> {
-        let page_ids = doc.get_pages().into_values().collect::<Vec<_>>();
+    fn from_document(mut doc: Document, mmap: Option<Mmap>) -> Result<Self> {
+        // Decrypt if encrypted (try empty password, which covers most "owner-only" PDFs)
+        if doc.is_encrypted() {
+            let _ = doc.decrypt("");
+        }
 
-        // Sort by page number — lopdf's get_pages returns BTreeMap<u32, ObjectId>
-        // which is already sorted by page number, but we re-collect as Vec.
+        let page_ids = doc.get_pages().into_values().collect::<Vec<_>>();
 
         Ok(Self {
             inner: Arc::new(doc),

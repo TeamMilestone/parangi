@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use pdfbox_text::PdfDocument;
+use pdfbox_text::stream::engine::StreamEngine;
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -151,4 +152,27 @@ fn test_font_dict_access() {
             );
         }
     }
+}
+
+#[test]
+fn test_stream_engine_real_pdf() {
+    let path = Path::new(SAMPLE_KOREAN_PDF);
+    if !path.exists() {
+        return;
+    }
+    let doc = PdfDocument::open(path).unwrap();
+    let page = doc.page(0).unwrap();
+    let content_bytes = page.content_bytes().unwrap();
+
+    let mut engine = StreamEngine::new(doc.inner_arc());
+    engine.process_content(&content_bytes).expect("stream engine should process content");
+
+    let segments = engine.text_segments();
+    assert!(!segments.is_empty(), "should extract text segments from real PDF");
+    println!("Text segments extracted: {}", segments.len());
+
+    // Verify segments have font info
+    let with_font = segments.iter().filter(|s| s.font_name.is_some()).count();
+    println!("Segments with font: {}/{}", with_font, segments.len());
+    assert!(with_font > 0, "at least some segments should have font names");
 }

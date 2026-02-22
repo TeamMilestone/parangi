@@ -4,6 +4,7 @@ use std::path::Path;
 use pdfbox_text::PdfDocument;
 use pdfbox_text::cos_helpers::DocumentExt;
 use pdfbox_text::encoding::cmap_parser;
+use pdfbox_text::font::PdfFont;
 use pdfbox_text::stream::engine::StreamEngine;
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
@@ -223,4 +224,58 @@ fn test_tounicode_cmap_parsing() {
     }
 
     assert!(found_tounicode, "should find at least one font with a ToUnicode CMap");
+}
+
+#[test]
+fn test_font_creation_and_decode() {
+    let path = Path::new(SAMPLE_KOREAN_PDF);
+    if !path.exists() {
+        return;
+    }
+    let doc = PdfDocument::open(path).unwrap();
+    let inner = doc.inner_arc();
+    let page = doc.page(0).unwrap();
+    let resources = page.resources().unwrap().unwrap();
+
+    let font_names = resources.font_names().unwrap();
+    let mut created_fonts = 0;
+    let mut decoded_chars = 0;
+
+    for name in &font_names {
+        if let Some((font_dict, oid)) = resources.get_font_dict(name).unwrap() {
+            match PdfFont::from_dict(&inner, font_dict, oid) {
+                Ok(font) => {
+                    created_fonts += 1;
+                    let font_name = String::from_utf8_lossy(name);
+
+                    if font.is_stub() {
+                        println!("Font {:?}: stub (composite/type3)", font_name);
+                        continue;
+                    }
+
+                    // Try decoding some common codes
+                    for code in 32..=126 {
+                        if let Some(unicode) = font.to_unicode(code) {
+                            decoded_chars += 1;
+                            if code == 65 {
+                                println!("Font {:?}: code 65 → {:?}", font_name, unicode);
+                            }
+                        }
+                    }
+                    println!(
+                        "Font {:?}: decoded {} chars in 32-126 range, width(65)={}",
+                        font_name,
+                        (32..=126).filter(|&c| font.to_unicode(c).is_some()).count(),
+                        font.get_width(65)
+                    );
+                }
+                Err(e) => {
+                    println!("Font {:?}: creation error: {}", String::from_utf8_lossy(name), e);
+                }
+            }
+        }
+    }
+
+    assert!(created_fonts > 0, "should create at least one font");
+    println!("Created {} fonts, decoded {} chars total", created_fonts, decoded_chars);
 }

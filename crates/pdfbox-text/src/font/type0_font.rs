@@ -13,6 +13,71 @@ use crate::encoding::cmap_manager;
 use crate::encoding::cmap_parser;
 use crate::Result;
 
+/// A width range entry: cid_start..=cid_end all have the same width.
+struct WidthRange {
+    start: u32,
+    end: u32,
+    width: f32,
+}
+
+/// Per-CID width storage with range compression.
+/// Uses individual HashMap entries for small ranges and range entries for large ones.
+struct CidWidths {
+    /// Individual CID → width mappings (for small ranges / W arrays).
+    individual: std::collections::HashMap<u32, f32>,
+    /// Range-based widths (for large cid_start..cid_end ranges).
+    /// Sorted by start CID for binary search.
+    ranges: Vec<WidthRange>,
+}
+
+impl CidWidths {
+    fn new() -> Self {
+        Self {
+            individual: std::collections::HashMap::new(),
+            ranges: Vec::new(),
+        }
+    }
+
+    fn insert_individual(&mut self, cid: u32, width: f32) {
+        self.individual.insert(cid, width);
+    }
+
+    fn insert_range(&mut self, start: u32, end: u32, width: f32) {
+        // For small ranges (<=32 entries), expand individually for faster lookup
+        if end - start <= 32 {
+            for cid in start..=end {
+                self.individual.insert(cid, width);
+            }
+        } else {
+            self.ranges.push(WidthRange { start, end, width });
+        }
+    }
+
+    fn finalize(&mut self) {
+        self.ranges.sort_unstable_by_key(|r| r.start);
+    }
+
+    fn get(&self, cid: u32) -> Option<f32> {
+        // Check individual first (most common for real fonts)
+        if let Some(&w) = self.individual.get(&cid) {
+            return Some(w);
+        }
+        // Binary search through ranges
+        self.ranges
+            .binary_search_by(|r| {
+                if cid < r.start {
+                    std::cmp::Ordering::Greater
+                } else if cid > r.end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()
+            .map(|i| self.ranges[i].width)
+    }
+}
+
 /// A Type0 (composite) font.
 pub struct Type0Font {
     /// Base font name.
@@ -29,8 +94,8 @@ pub struct Type0Font {
     is_descendant_cjk: bool,
     /// Default width (DW) from the CIDFont descendant.
     default_width: f32,
-    /// Per-CID widths from the W array.
-    widths: std::collections::HashMap<u32, f32>,
+    /// Per-CID widths with range compression.
+    widths: CidWidths,
 }
 
 impl Type0Font {
@@ -147,7 +212,7 @@ impl Type0Font {
     /// Get the width for a character code.
     pub fn get_width(&self, code: u32) -> f32 {
         let cid = self.code_to_cid(code);
-        self.widths.get(&cid).copied().unwrap_or(self.default_width)
+        self.widths.get(cid).unwrap_or(self.default_width)
     }
 
     /// Read a character code from the byte stream using the encoding CMap's
@@ -365,8 +430,8 @@ impl Type0Font {
     fn read_widths(
         doc: &Document,
         descendant: Option<&lopdf::Dictionary>,
-    ) -> std::collections::HashMap<u32, f32> {
-        let mut result = std::collections::HashMap::new();
+    ) -> CidWidths {
+        let mut result = CidWidths::new();
         let desc = match descendant {
             Some(d) => d,
             None => return result,
@@ -389,6 +454,7 @@ impl Type0Font {
         };
 
         Self::parse_w_array(doc, arr, &mut result);
+        result.finalize();
         result
     }
 
@@ -398,7 +464,7 @@ impl Type0Font {
     fn parse_w_array(
         doc: &Document,
         arr: &[Object],
-        widths: &mut std::collections::HashMap<u32, f32>,
+        widths: &mut CidWidths,
     ) {
         let mut i = 0;
         while i < arr.len() {
@@ -422,7 +488,7 @@ impl Type0Font {
                     // Format: cid [w1 w2 w3 ...]
                     for (j, w_obj) in width_arr.iter().enumerate() {
                         let w = Self::obj_to_f32_val(doc, w_obj);
-                        widths.insert(cid_start + j as u32, w);
+                        widths.insert_individual(cid_start + j as u32, w);
                     }
                     i += 1;
                 }
@@ -437,9 +503,7 @@ impl Type0Font {
                     } else {
                         1000.0
                     };
-                    for cid in cid_start..=cid_end {
-                        widths.insert(cid, width);
-                    }
+                    widths.insert_range(cid_start, cid_end, width);
                 }
                 _ => {
                     i += 1;
@@ -498,7 +562,7 @@ mod tests {
             ucs2_cmap: None,
             is_descendant_cjk: false,
             default_width: 1000.0,
-            widths: std::collections::HashMap::new(),
+            widths: CidWidths::new(),
         };
         assert_eq!(font.code_to_cid(0x41), 0x41);
     }
@@ -517,7 +581,7 @@ mod tests {
             ucs2_cmap: None,
             is_descendant_cjk: false,
             default_width: 1000.0,
-            widths: std::collections::HashMap::new(),
+            widths: CidWidths::new(),
         };
 
         assert_eq!(font.to_unicode(0x0041), Some("A".to_string()));
@@ -526,9 +590,9 @@ mod tests {
 
     #[test]
     fn test_width_lookup() {
-        let mut widths = std::collections::HashMap::new();
-        widths.insert(100u32, 500.0f32);
-        widths.insert(101, 600.0);
+        let mut widths = CidWidths::new();
+        widths.insert_individual(100, 500.0);
+        widths.insert_individual(101, 600.0);
 
         let font = Type0Font {
             base_font: "TestFont".to_string(),

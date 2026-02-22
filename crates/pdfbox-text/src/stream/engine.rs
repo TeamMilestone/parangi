@@ -797,18 +797,33 @@ impl StreamEngine {
         }
 
         // Read text state values upfront to avoid borrow issues.
-        let font_name = self.state_stack.current().text_state.font_name.clone();
-        let font_size = self.state_stack.current().text_state.font_size;
-        let hs = self.state_stack.current().text_state.horizontal_scaling_fraction();
-        let char_spacing = self.state_stack.current().text_state.character_spacing;
-        let word_spacing = self.state_stack.current().text_state.word_spacing;
-        let _rise = self.state_stack.current().text_state.rise;
+        let gs = self.state_stack.current();
+        let font_name = gs.text_state.font_name.clone();
+        let font_size = gs.text_state.font_size;
+        let hs = gs.text_state.horizontal_scaling_fraction();
+        let char_spacing = gs.text_state.character_spacing;
+        let word_spacing = gs.text_state.word_spacing;
 
         // Check if we have a font loaded.
         let has_font = font_name
             .as_ref()
             .map(|n| self.fonts.contains_key(n))
             .unwrap_or(false);
+
+        // Cache space_width and actual_text for use in loop.
+        let cached_space_width = if has_font {
+            let name = font_name.as_ref().unwrap();
+            let sw = self.fonts[name].get_width(32) / 1000.0;
+            if sw > 0.0 {
+                sw
+            } else {
+                let avg = self.fonts[name].get_width(65) / 1000.0;
+                if avg > 0.0 { avg * 0.80 } else { 0.25 }
+            }
+        } else {
+            0.25
+        };
+        let actual_text_value = self.actual_text.clone();
 
         let mut offset = 0;
         while offset < bytes.len() {
@@ -857,25 +872,8 @@ impl StreamEngine {
             let font_height_text = 1.0; // 1.0 = full em in text space
             let dy_display = (font_height_text * trm.scaling_factor_y()).abs();
 
-            // --- Space width in display space ---
-            let space_width_text = if has_font {
-                let name = font_name.as_ref().unwrap();
-                let sw = self.fonts[name].get_width(32) / 1000.0;
-                if sw > 0.0 {
-                    sw
-                } else {
-                    // Fallback: use average width heuristic
-                    let avg = self.fonts[name].get_width(65) / 1000.0;
-                    if avg > 0.0 {
-                        avg * 0.80
-                    } else {
-                        0.25
-                    }
-                }
-            } else {
-                0.25
-            };
-            let space_width_display = (space_width_text * trm.scaling_factor_x()).abs();
+            // --- Space width in display space (cached) ---
+            let space_width_display = (cached_space_width * trm.scaling_factor_x()).abs();
 
             // --- Unicode mapping ---
             let unicode = if has_font {
@@ -895,11 +893,11 @@ impl StreamEngine {
             let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
 
             // --- Apply ActualText replacement if active ---
-            let final_unicode = if self.actual_text.is_some() {
+            let final_unicode = if actual_text_value.is_some() {
                 if self.first_actual_text_position {
                     // First glyph in ActualText span: use the ActualText value
                     self.first_actual_text_position = false;
-                    self.actual_text.clone().unwrap_or_default()
+                    actual_text_value.clone().unwrap_or_default()
                 } else {
                     // Subsequent glyphs in ActualText span: suppress (empty string)
                     String::new()

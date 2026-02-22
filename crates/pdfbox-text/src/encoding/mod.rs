@@ -3,6 +3,7 @@
 //! Ported from org.apache.pdfbox.pdmodel.font.encoding.
 
 pub mod cmap;
+pub mod cmap_manager;
 pub mod cmap_parser;
 pub mod dictionary;
 pub mod glyph_list;

@@ -3,19 +3,21 @@
 //! Ported from org.apache.pdfbox.pdmodel.font.
 
 pub mod simple_font;
+pub mod type0_font;
 
 use lopdf::{Document, ObjectId};
 
 use crate::cos_helpers::name_to_string;
 use crate::Result;
 use simple_font::SimpleFont;
+use type0_font::Type0Font;
 
 /// A PDF font that can decode character codes to Unicode text.
 pub enum PdfFont {
     /// Simple fonts: Type1, TrueType, MMType1.
     Simple(SimpleFont),
-    /// Type0 (composite) fonts — to be implemented in pdf08.
-    Type0Stub,
+    /// Type0 (composite) fonts for CJK text.
+    Type0(Type0Font),
     /// Type3 fonts — to be implemented in pdf09.
     Type3Stub,
 }
@@ -42,14 +44,13 @@ impl PdfFont {
                 Ok(PdfFont::Simple(font))
             }
             "Type0" => {
-                // Stub — will be implemented in pdf08
-                Ok(PdfFont::Type0Stub)
+                let font = Type0Font::from_dict(doc, font_dict)?;
+                Ok(PdfFont::Type0(font))
             }
             "Type3" => {
-                // Stub — will be implemented in pdf09
                 Ok(PdfFont::Type3Stub)
             }
-            _ => Ok(PdfFont::Type0Stub), // Unknown → stub
+            _ => Ok(PdfFont::Type3Stub), // Unknown → stub
         }
     }
 
@@ -59,7 +60,8 @@ impl PdfFont {
     pub fn to_unicode(&self, code: u32) -> Option<String> {
         match self {
             PdfFont::Simple(f) => f.to_unicode(code),
-            PdfFont::Type0Stub | PdfFont::Type3Stub => None,
+            PdfFont::Type0(f) => f.to_unicode(code),
+            PdfFont::Type3Stub => None,
         }
     }
 
@@ -67,12 +69,13 @@ impl PdfFont {
     pub fn get_width(&self, code: u32) -> f32 {
         match self {
             PdfFont::Simple(f) => f.get_width(code),
-            PdfFont::Type0Stub | PdfFont::Type3Stub => 0.0,
+            PdfFont::Type0(f) => f.get_width(code),
+            PdfFont::Type3Stub => 0.0,
         }
     }
 
     /// Whether this is a stub (unimplemented font type).
     pub fn is_stub(&self) -> bool {
-        matches!(self, PdfFont::Type0Stub | PdfFont::Type3Stub)
+        matches!(self, PdfFont::Type3Stub)
     }
 }

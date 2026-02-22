@@ -1,0 +1,20 @@
+[package]
+name = "pdfbox-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PDF text extraction library ported from Apache PDFBox"
+
+[dependencies]
+lopdf = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+encoding_rs = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-bidi = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

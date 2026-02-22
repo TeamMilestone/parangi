@@ -114,6 +114,23 @@ impl<'a> PdfResources<'a> {
         }
     }
 
+    /// Get the ColorSpace sub-dictionary.
+    pub fn color_space_dict(&self) -> Result<Option<&lopdf::Dictionary>> {
+        match self.doc.dict_get_opt(self.dict, b"ColorSpace")? {
+            Some(obj) => Ok(Some(obj.as_dict()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Check if a given resource name exists in the Font sub-dictionary.
+    pub fn has_font(&self, name: &[u8]) -> Result<bool> {
+        let font_dict = match self.font_dict()? {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+        Ok(font_dict.has(name))
+    }
+
     /// Get the underlying dictionary.
     pub fn dictionary(&self) -> &lopdf::Dictionary {
         self.dict

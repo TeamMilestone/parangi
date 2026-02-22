@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use lopdf::{Document, Object, ObjectId};
 
-use crate::cos_helpers::DocumentExt;
+use crate::cos_helpers::{obj_to_f32, DocumentExt};
 use crate::resources::PdfResources;
 use crate::{PdfError, Result};
 
@@ -190,10 +190,10 @@ impl PdfPage {
     fn get_box(&self, dict: &lopdf::Dictionary, key: &[u8]) -> Result<Option<[f32; 4]>> {
         match self.doc.dict_get_opt(dict, key)? {
             Some(Object::Array(arr)) if arr.len() >= 4 => {
-                let x0 = arr[0].as_f32()?;
-                let y0 = arr[1].as_f32()?;
-                let x1 = arr[2].as_f32()?;
-                let y1 = arr[3].as_f32()?;
+                let x0 = obj_to_f32(self.doc.deref(&arr[0])?)?;
+                let y0 = obj_to_f32(self.doc.deref(&arr[1])?)?;
+                let x1 = obj_to_f32(self.doc.deref(&arr[2])?)?;
+                let y1 = obj_to_f32(self.doc.deref(&arr[3])?)?;
                 Ok(Some([x0, y0, x1, y1]))
             }
             _ => Ok(None),

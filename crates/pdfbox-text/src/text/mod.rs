@@ -1,8 +1,12 @@
 //! Text extraction and assembly.
 //!
 //! - `text_position`: Individual glyph/character positions (ported from TextPosition)
-//! - Text assembly (PDFTextStripper port) — to be implemented in iterations 13-16.
+//! - `comparator`: Sorting TextPositions into reading order
+//! - `stripper`: Assembling TextPositions into readable text (PDFTextStripper port)
 
+pub mod comparator;
+pub mod stripper;
 pub mod text_position;
 
+pub use stripper::{assemble_text, StripperConfig};
 pub use text_position::TextPosition;

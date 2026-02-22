@@ -6,6 +6,7 @@ use pdfbox_text::cos_helpers::DocumentExt;
 use pdfbox_text::encoding::cmap_parser;
 use pdfbox_text::font::PdfFont;
 use pdfbox_text::stream::engine::StreamEngine;
+use pdfbox_text::text::{assemble_text, StripperConfig};
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -288,4 +289,61 @@ fn test_font_creation_and_decode() {
 
     assert!(created_fonts > 0, "should create at least one font");
     println!("Created {} fonts, decoded {} chars total", created_fonts, decoded_chars);
+}
+
+#[test]
+fn test_full_text_extraction() {
+    let path = Path::new(SAMPLE_KOREAN_PDF);
+    if !path.exists() {
+        return;
+    }
+
+    let text = pdfbox_text::extract_text(path).expect("full text extraction should work");
+    assert!(!text.is_empty(), "extracted text should not be empty");
+    println!("Full extracted text length: {} chars", text.len());
+
+    // Should contain Korean text
+    let has_korean = text.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+    assert!(has_korean, "should contain Korean characters");
+
+    // Print first 500 chars for inspection
+    let preview: String = text.chars().take(500).collect();
+    println!("--- Text preview ---\n{}\n--- End preview ---", preview);
+}
+
+#[test]
+fn test_text_assembly_with_real_pdf() {
+    let path = Path::new(SAMPLE_KOREAN_PDF);
+    if !path.exists() {
+        return;
+    }
+    let doc = PdfDocument::open(path).unwrap();
+    let page = doc.page(0).unwrap();
+    let content_bytes = page.content_bytes().unwrap();
+
+    let resources = page.resources().unwrap().unwrap();
+    let rotation = page.rotation().unwrap_or(0) as i32;
+    let media_box = page.media_box().unwrap();
+
+    let mut engine = StreamEngine::new(doc.inner_arc());
+    engine.set_page_info(rotation, media_box[2], media_box[3]);
+    engine.load_resources(resources.dictionary());
+    engine.process_content(&content_bytes).expect("stream engine should process content");
+
+    let mut positions = engine.into_text_positions();
+    assert!(!positions.is_empty(), "should have text positions");
+
+    let config = StripperConfig::default();
+    let text = assemble_text(&mut positions, &config);
+    assert!(!text.is_empty(), "assembled text should not be empty");
+
+    // Count lines
+    let line_count = text.lines().count();
+    println!("Assembled text: {} chars, {} lines", text.len(), line_count);
+    assert!(line_count > 1, "should have multiple lines");
+
+    // Print first 10 lines
+    for (i, line) in text.lines().take(10).enumerate() {
+        println!("  Line {}: {}", i, line);
+    }
 }

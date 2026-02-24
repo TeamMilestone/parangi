@@ -96,6 +96,15 @@ impl Type3Font {
             }
         }
 
+        // Tier 3: fallback — use the code directly as Unicode code point
+        // This matches Java PDFBox behavior for Type3 fonts with
+        // custom glyph names not in the Adobe Glyph List.
+        if let Some(ch) = char::from_u32(code) {
+            if !ch.is_control() || ch == ' ' || ch == '\t' {
+                return Some(ch.to_string());
+            }
+        }
+
         None
     }
 

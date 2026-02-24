@@ -194,6 +194,14 @@ impl Type0Font {
             }
         }
 
+        // Tier 4: Identity-H/V encoding without ToUnicode or UCS2 → CID is Unicode
+        if self.encoding_cmap.name.starts_with("Identity") {
+            let cid = self.code_to_cid(code);
+            if let Some(ch) = char::from_u32(cid) {
+                return Some(ch.to_string());
+            }
+        }
+
         None
     }
 

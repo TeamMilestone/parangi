@@ -664,10 +664,11 @@ impl StreamEngine {
             return Ok(None);
         }
 
-        // Decompress content
-        let content_bytes = stream
-            .decompressed_content()
-            .map_err(|e| PdfError::Parse(format!("Form XObject decompression: {}", e)))?;
+        // Decompress content (fall back to raw bytes for streams without /Filter)
+        let content_bytes = match stream.decompressed_content() {
+            Ok(data) => data,
+            Err(_) => stream.content.clone(),
+        };
 
         if content_bytes.is_empty() {
             return Ok(None);

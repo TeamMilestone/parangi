@@ -951,7 +951,7 @@ impl StreamEngine {
             if !final_unicode.is_empty() {
                 let tp = TextPosition {
                     unicode: final_unicode,
-                    char_codes: vec![code],
+                    char_code: code,
                     text_matrix: trm,
                     end_x,
                     end_y,

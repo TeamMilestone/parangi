@@ -10,8 +10,8 @@ use crate::stream::matrix::Matrix;
 pub struct TextPosition {
     /// Unicode text for this glyph (may be multi-char for ligatures).
     pub unicode: String,
-    /// PDF character codes (internal, not Unicode).
-    pub char_codes: Vec<u32>,
+    /// PDF character code (internal, not Unicode).
+    pub char_code: u32,
 
     /// Text rendering matrix at the glyph's starting position.
     /// TRM = [fontSize*Hs 0 0; 0 fontSize 0; 0 rise 1] x Tm x CTM
@@ -140,7 +140,7 @@ mod tests {
     fn make_tp(unicode: &str, trm: Matrix, end_x: f32, end_y: f32) -> TextPosition {
         TextPosition {
             unicode: unicode.to_string(),
-            char_codes: vec![0],
+            char_code: 0,
             text_matrix: trm,
             end_x,
             end_y,

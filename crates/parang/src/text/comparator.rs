@@ -36,7 +36,7 @@ mod tests {
         let trm = Matrix::from_values(height, 0.0, 0.0, height, x, y);
         TextPosition {
             unicode: unicode.to_string(),
-            char_codes: vec![0],
+            char_code: 0,
             text_matrix: trm,
             end_x: x + width,
             end_y: y,

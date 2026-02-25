@@ -304,19 +304,29 @@ fn parse_hex_string(data: &[u8], mut pos: usize) -> (Vec<u8>, usize) {
     (result, pos)
 }
 
-/// Parse a number (integer or real).
+/// Parse a number (integer or real) using fast hand-written parsers.
+/// PDF numbers are simple: [+-]digits[.digits] — no scientific notation.
 fn parse_number(data: &[u8], mut pos: usize) -> (Object, usize) {
     let start = pos;
     let len = data.len();
     let mut has_dot = false;
 
     // Optional sign
-    if pos < len && (data[pos] == b'+' || data[pos] == b'-') {
+    let negative = if pos < len && data[pos] == b'-' {
         pos += 1;
-    }
+        true
+    } else if pos < len && data[pos] == b'+' {
+        pos += 1;
+        false
+    } else {
+        false
+    };
 
     // Digits before decimal point
+    let int_start = pos;
+    let mut int_val: i64 = 0;
     while pos < len && data[pos].is_ascii_digit() {
+        int_val = int_val * 10 + (data[pos] - b'0') as i64;
         pos += 1;
     }
 
@@ -324,31 +334,38 @@ fn parse_number(data: &[u8], mut pos: usize) -> (Object, usize) {
     if pos < len && data[pos] == b'.' {
         has_dot = true;
         pos += 1;
+        let frac_start = pos;
+        let mut frac_val: u64 = 0;
         while pos < len && data[pos].is_ascii_digit() {
+            frac_val = frac_val * 10 + (data[pos] - b'0') as u64;
             pos += 1;
         }
-    }
 
-    // Edge case: sign only (e.g. a stray '-' not followed by digits)
-    if pos == start || (pos == start + 1 && (data[start] == b'+' || data[start] == b'-')) {
-        return (Object::Integer(0), pos.max(start + 1));
-    }
+        // Edge case: sign only or no digits at all
+        if pos == int_start && frac_val == 0 && pos == frac_start {
+            return (Object::Integer(0), pos.max(start + 1));
+        }
 
-    let slice = &data[start..pos];
-    // Safety: slice contains only ASCII digits, sign, and dot
-    let s = unsafe { std::str::from_utf8_unchecked(slice) };
-
-    if has_dot {
-        (Object::Real(fast_parse_f32(s)), pos)
+        let frac_digits = pos - frac_start;
+        // Precomputed powers of 10 for up to 9 fractional digits (covers all PDF use cases)
+        static POW10: [f32; 10] = [
+            1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0,
+            1_000_000.0, 10_000_000.0, 100_000_000.0, 1_000_000_000.0,
+        ];
+        let divisor = if frac_digits < 10 {
+            POW10[frac_digits]
+        } else {
+            10.0f32.powi(frac_digits as i32)
+        };
+        let result = int_val as f32 + frac_val as f32 / divisor;
+        (Object::Real(if negative { -result } else { result }), pos)
     } else {
-        (Object::Integer(s.parse::<i64>().unwrap_or(0)), pos)
+        // Edge case: sign only (e.g. a stray '-' not followed by digits)
+        if pos == int_start {
+            return (Object::Integer(0), pos.max(start + 1));
+        }
+        (Object::Integer(if negative { -int_val } else { int_val }), pos)
     }
-}
-
-/// Fast f32 parsing optimized for PDF number formats.
-#[inline]
-fn fast_parse_f32(s: &str) -> f32 {
-    s.parse::<f32>().unwrap_or(0.0)
 }
 
 /// Parse an array after the opening `[`.

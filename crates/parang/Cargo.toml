@@ -1,10 +1,11 @@
 [package]
-name = "pdfbox-text"
+name = "parang"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "PDF text extraction library ported from Apache PDFBox"
+authors.workspace = true
+description = "PDF text extraction library — Rust port of Apache PDFBox"
 
 [dependencies]
 lopdf = { workspace = true }

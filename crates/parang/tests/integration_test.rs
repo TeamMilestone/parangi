@@ -1,12 +1,12 @@
 //! Integration tests using real PDF files.
 
 use std::path::Path;
-use pdfbox_text::PdfDocument;
-use pdfbox_text::cos_helpers::DocumentExt;
-use pdfbox_text::encoding::cmap_parser;
-use pdfbox_text::font::PdfFont;
-use pdfbox_text::stream::engine::StreamEngine;
-use pdfbox_text::text::{assemble_text, StripperConfig};
+use parang::PdfDocument;
+use parang::cos_helpers::DocumentExt;
+use parang::encoding::cmap_parser;
+use parang::font::PdfFont;
+use parang::stream::engine::StreamEngine;
+use parang::text::{assemble_text, StripperConfig};
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -298,7 +298,7 @@ fn test_full_text_extraction() {
         return;
     }
 
-    let text = pdfbox_text::extract_text(path).expect("full text extraction should work");
+    let text = parang::extract_text(path).expect("full text extraction should work");
     assert!(!text.is_empty(), "extracted text should not be empty");
     println!("Full extracted text length: {} chars", text.len());
 

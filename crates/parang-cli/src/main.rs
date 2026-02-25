@@ -5,7 +5,7 @@ use clap::Parser;
 
 /// PDF text extraction CLI tool (Rust port of Apache PDFBox text extraction).
 #[derive(Parser, Debug)]
-#[command(name = "pdfbox-text", version, about)]
+#[command(name = "parang", version, about)]
 struct Cli {
     /// Input PDF file path(s)
     #[arg(required = true)]
@@ -39,15 +39,15 @@ fn main() {
             .ok();
     }
 
-    let config = pdfbox_text::StripperConfig::default();
+    let config = parang::StripperConfig::default();
 
     if cli.input.len() == 1 && cli.output_dir.is_none() {
         // Single file mode: output to stdout or specified file
         let path = &cli.input[0];
         let result = if cli.sequential {
-            pdfbox_text::extract_text_sequential(path, &config)
+            parang::extract_text_sequential(path, &config)
         } else {
-            pdfbox_text::extract_text_with_config(path, &config)
+            parang::extract_text_with_config(path, &config)
         };
         match result {
             Ok(text) => {
@@ -75,7 +75,7 @@ fn main() {
             });
         }
 
-        let results = pdfbox_text::extract_text_batch(&cli.input, &config);
+        let results = parang::extract_text_batch(&cli.input, &config);
 
         let mut success_count = 0u32;
         let mut error_count = 0u32;

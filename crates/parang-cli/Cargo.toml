@@ -1,13 +1,18 @@
 [package]
-name = "pdfbox-text-cli"
+name = "parang-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 description = "CLI tool for PDF text extraction"
 
+[[bin]]
+name = "parang"
+path = "src/main.rs"
+
 [dependencies]
-pdfbox-text = { path = "../pdfbox-text" }
+parang = { path = "../parang" }
 clap = { workspace = true }
 rayon = { workspace = true }
 env_logger = { workspace = true }

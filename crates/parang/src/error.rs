@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Result type for pdfbox-text operations.
+/// Result type for parang operations.
 pub type Result<T> = std::result::Result<T, PdfError>;
 
 /// Errors that can occur during PDF text extraction.

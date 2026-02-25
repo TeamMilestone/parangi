@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use lopdf::{Document, Object, ObjectId};
 
 /// Thread-safe font cache keyed by ObjectId.
-pub type FontCache = Arc<Mutex<HashMap<ObjectId, PdfFont>>>;
+pub type FontCache = Arc<Mutex<HashMap<ObjectId, Arc<PdfFont>>>>;
 
 use super::graphics_state::GraphicsStateStack;
 use super::matrix::Matrix;
@@ -35,7 +35,7 @@ struct MarkedContentEntry {
 struct FormData {
     content_bytes: Vec<u8>,
     matrix: Option<Matrix>,
-    resources_fonts: Option<HashMap<Vec<u8>, PdfFont>>,
+    resources_fonts: Option<HashMap<Vec<u8>, Arc<PdfFont>>>,
     resources_xobject_refs: Option<HashMap<Vec<u8>, ObjectId>>,
 }
 
@@ -48,7 +48,7 @@ pub struct StreamEngine {
     state_stack: GraphicsStateStack,
 
     /// Loaded fonts keyed by resource name (e.g. b"F1").
-    fonts: HashMap<Vec<u8>, PdfFont>,
+    fonts: HashMap<Vec<u8>, Arc<PdfFont>>,
     /// XObject references in current scope (name → ObjectId).
     xobject_refs: HashMap<Vec<u8>, ObjectId>,
     /// Collected text positions from this content stream.
@@ -122,7 +122,7 @@ impl StreamEngine {
     }
 
     /// Set pre-loaded fonts for character decoding.
-    pub fn set_fonts(&mut self, fonts: HashMap<Vec<u8>, PdfFont>) {
+    pub fn set_fonts(&mut self, fonts: HashMap<Vec<u8>, Arc<PdfFont>>) {
         self.fonts = fonts;
     }
 
@@ -600,7 +600,7 @@ impl StreamEngine {
         &self,
         form_dict: &lopdf::Dictionary,
     ) -> (
-        Option<HashMap<Vec<u8>, PdfFont>>,
+        Option<HashMap<Vec<u8>, Arc<PdfFont>>>,
         Option<HashMap<Vec<u8>, ObjectId>>,
     ) {
         let res_obj = match form_dict.get(b"Resources") {
@@ -630,7 +630,7 @@ impl StreamEngine {
         doc: &Document,
         resources_dict: &lopdf::Dictionary,
         font_cache: &Option<FontCache>,
-    ) -> HashMap<Vec<u8>, PdfFont> {
+    ) -> HashMap<Vec<u8>, Arc<PdfFont>> {
         let mut fonts = HashMap::new();
 
         let font_dict = match resources_dict.get(b"Font") {
@@ -665,7 +665,7 @@ impl StreamEngine {
                 if let Some(cache) = font_cache {
                     if let Ok(cache_guard) = cache.lock() {
                         if let Some(cached_font) = cache_guard.get(&oid) {
-                            fonts.insert(name.clone(), cached_font.clone());
+                            fonts.insert(name.clone(), Arc::clone(cached_font));
                             continue;
                         }
                     }
@@ -674,11 +674,12 @@ impl StreamEngine {
 
             match PdfFont::from_dict(doc, dict, oid) {
                 Ok(font) => {
+                    let font = Arc::new(font);
                     // Store in cache
                     if oid != (0, 0) {
                         if let Some(cache) = font_cache {
                             if let Ok(mut cache_guard) = cache.lock() {
-                                cache_guard.insert(oid, font.clone());
+                                cache_guard.insert(oid, Arc::clone(&font));
                             }
                         }
                     }
@@ -1197,7 +1198,7 @@ mod tests {
                 (0..224).map(|i| Object::Integer(500 + i)).collect()
             )
         };
-        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+        let font = Arc::new(PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap()));
 
         let mut fonts = HashMap::new();
         fonts.insert(b"F1".to_vec(), font);
@@ -1272,7 +1273,7 @@ mod tests {
                 (0..224).map(|_| Object::Integer(600)).collect()
             )
         };
-        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+        let font = Arc::new(PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap()));
 
         let mut fonts = HashMap::new();
         fonts.insert(b"F1".to_vec(), font);
@@ -1410,7 +1411,7 @@ mod tests {
                 (0..224).map(|_| Object::Integer(500)).collect()
             )
         };
-        let font = PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap());
+        let font = Arc::new(PdfFont::Simple(SimpleFont::from_dict(&doc, &font_dict, "Type1").unwrap()));
 
         let mut fonts = HashMap::new();
         fonts.insert(b"F1".to_vec(), font);

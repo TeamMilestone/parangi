@@ -434,7 +434,7 @@ fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
     }
 
     // Map: character → list of (x, y) positions seen
-    let mut seen: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
+    let mut seen: HashMap<&str, Vec<(f32, f32)>> = HashMap::new();
     let mut keep = vec![true; positions.len()];
 
     for (i, pos) in positions.iter().enumerate() {
@@ -442,11 +442,8 @@ fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
             continue;
         }
 
-        let tolerance = if !pos.unicode.is_empty() {
-            pos.individual_width.abs() / pos.unicode.chars().count().max(1) as f32 / 3.0
-        } else {
-            0.0
-        };
+        let tolerance =
+            pos.individual_width.abs() / pos.unicode.chars().count().max(1) as f32 / 3.0;
 
         if tolerance <= 0.0 {
             continue;
@@ -455,7 +452,10 @@ fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
         let x = pos.x();
         let y = pos.y();
 
-        let positions_for_char = seen.entry(pos.unicode.clone()).or_default();
+        // SAFETY: we only read `pos.unicode` as &str while `positions` is immutably borrowed
+        // in this loop. The `keep` vec is used afterward to filter.
+        let key: &str = unsafe { &*(pos.unicode.as_str() as *const str) };
+        let positions_for_char = seen.entry(key).or_default();
 
         // Check if any existing position is within tolerance
         let is_duplicate = positions_for_char.iter().any(|&(px, py)| {
@@ -469,14 +469,13 @@ fn suppress_duplicate_positions(positions: &mut Vec<TextPosition>) {
         }
     }
 
-    // Remove duplicates (iterate in reverse to preserve indices)
-    let mut i = positions.len();
-    while i > 0 {
-        i -= 1;
-        if !keep[i] {
-            positions.remove(i);
-        }
-    }
+    // Batch removal via retain (O(n) instead of O(n²))
+    let mut idx = 0;
+    positions.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
 }
 
 /// Remove space characters whose X range is contained within another character.
@@ -489,9 +488,10 @@ fn remove_contained_spaces(positions: &mut Vec<TextPosition>) {
         return;
     }
 
-    let mut remove_indices = Vec::new();
+    let len = positions.len();
+    let mut keep = vec![true; len];
 
-    for i in 0..positions.len() {
+    for i in 0..len {
         if positions[i].unicode != " " {
             continue;
         }
@@ -502,7 +502,7 @@ fn remove_contained_spaces(positions: &mut Vec<TextPosition>) {
         let space_height = positions[i].height_dir_adj();
 
         // Check if this space is contained within a neighboring character
-        for j in (i.saturating_sub(5))..((i + 6).min(positions.len())) {
+        for j in (i.saturating_sub(5))..((i + 6).min(len)) {
             if i == j || positions[j].unicode == " " {
                 continue;
             }
@@ -522,16 +522,19 @@ fn remove_contained_spaces(positions: &mut Vec<TextPosition>) {
 
             // Space is contained if its X range falls entirely within the character's X range
             if space_x >= char_x && space_end_x <= char_end_x {
-                remove_indices.push(i);
+                keep[i] = false;
                 break;
             }
         }
     }
 
-    // Remove in reverse order
-    for &i in remove_indices.iter().rev() {
-        positions.remove(i);
-    }
+    // Batch removal via retain (O(n) instead of O(n²))
+    let mut idx = 0;
+    positions.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
 }
 
 /// Check if two vertical ranges overlap (same line detection).

@@ -848,26 +848,23 @@ impl StreamEngine {
 
         // Read text state values upfront to avoid borrow issues.
         let gs = self.state_stack.current();
-        let font_name = gs.text_state.font_name.clone();
         let font_size = gs.text_state.font_size;
         let hs = gs.text_state.horizontal_scaling_fraction();
         let char_spacing = gs.text_state.character_spacing;
         let word_spacing = gs.text_state.word_spacing;
 
-        // Check if we have a font loaded.
-        let has_font = font_name
-            .as_ref()
-            .map(|n| self.fonts.contains_key(n))
-            .unwrap_or(false);
+        // Cache font reference (Arc clone is cheap — avoids 3 HashMap lookups per glyph).
+        let font = gs.text_state.font_name.as_ref()
+            .and_then(|name| self.fonts.get(name))
+            .cloned();
 
         // Cache space_width and actual_text for use in loop.
-        let cached_space_width = if has_font {
-            let name = font_name.as_ref().unwrap();
-            let sw = self.fonts[name].get_width(32) / 1000.0;
+        let cached_space_width = if let Some(ref f) = font {
+            let sw = f.get_width(32) / 1000.0;
             if sw > 0.0 {
                 sw
             } else {
-                let avg = self.fonts[name].get_width(65) / 1000.0;
+                let avg = f.get_width(65) / 1000.0;
                 if avg > 0.0 { avg * 0.80 } else { 0.25 }
             }
         } else {
@@ -878,9 +875,8 @@ impl StreamEngine {
         let mut offset = 0;
         while offset < bytes.len() {
             // --- Read character code ---
-            let (code, code_length) = if has_font {
-                let name = font_name.as_ref().unwrap();
-                self.fonts[name].read_code(bytes, offset)
+            let (code, code_length) = if let Some(ref f) = font {
+                f.read_code(bytes, offset)
             } else {
                 // No font: single-byte fallback
                 (bytes[offset] as u32, 1)
@@ -895,9 +891,8 @@ impl StreamEngine {
             let trm = self.compute_text_rendering_matrix();
 
             // --- Get glyph width (text space, 1/1000 units) ---
-            let width_1000 = if has_font {
-                let name = font_name.as_ref().unwrap();
-                self.fonts[name].get_width(code)
+            let width_1000 = if let Some(ref f) = font {
+                f.get_width(code)
             } else {
                 0.0
             };
@@ -917,18 +912,14 @@ impl StreamEngine {
             let dx_display = end_x - trm.translate_x();
 
             // --- Font height in display space ---
-            // Simplified: use fontSize (text space) scaled by TRM Y factor.
-            // Full implementation would use FontDescriptor CapHeight/BBox.
-            let font_height_text = 1.0; // 1.0 = full em in text space
-            let dy_display = (font_height_text * trm.scaling_factor_y()).abs();
+            let dy_display = trm.scaling_factor_y().abs();
 
             // --- Space width in display space (cached) ---
             let space_width_display = (cached_space_width * trm.scaling_factor_x()).abs();
 
             // --- Unicode mapping ---
-            let unicode = if has_font {
-                let name = font_name.as_ref().unwrap();
-                self.fonts[name].to_unicode(code).unwrap_or_default()
+            let unicode = if let Some(ref f) = font {
+                f.to_unicode(code).unwrap_or_default()
             } else {
                 // Fallback: interpret as Latin-1
                 if let Some(ch) = char::from_u32(code) {

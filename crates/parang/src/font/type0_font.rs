@@ -14,6 +14,7 @@ use crate::encoding::cmap_parser;
 use crate::Result;
 
 /// A width range entry: cid_start..=cid_end all have the same width.
+#[derive(Clone)]
 struct WidthRange {
     start: u32,
     end: u32,
@@ -22,6 +23,7 @@ struct WidthRange {
 
 /// Per-CID width storage with range compression.
 /// Uses individual HashMap entries for small ranges and range entries for large ones.
+#[derive(Clone)]
 struct CidWidths {
     /// Individual CID → width mappings (for small ranges / W arrays).
     individual: std::collections::HashMap<u32, f32>,
@@ -79,6 +81,7 @@ impl CidWidths {
 }
 
 /// A Type0 (composite) font.
+#[derive(Clone)]
 pub struct Type0Font {
     /// Base font name.
     base_font: String,

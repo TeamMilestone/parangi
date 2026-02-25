@@ -3,6 +3,7 @@
 //! Processes PDF content stream operators to extract text positioning
 //! and rendering information.
 
+pub mod content_parser;
 pub mod engine;
 pub mod graphics_state;
 pub mod matrix;

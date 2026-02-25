@@ -20,6 +20,7 @@ use crate::Result;
 ///
 /// Type3 fonts are user-defined fonts where each glyph is a small PDF content stream.
 /// For text extraction, we rely on ToUnicode CMap or encoding + glyph list.
+#[derive(Clone)]
 pub struct Type3Font {
     /// Base font name.
     base_font: String,

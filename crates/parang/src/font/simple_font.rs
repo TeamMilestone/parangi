@@ -18,6 +18,7 @@ use crate::encoding::Encoding;
 use crate::Result;
 
 /// A simple (single-byte) PDF font.
+#[derive(Clone)]
 pub struct SimpleFont {
     /// Font subtype: "Type1", "TrueType", "MMType1".
     subtype: String,

@@ -20,6 +20,9 @@ pub use error::{PdfError, Result};
 pub use text::{StripperConfig, assemble_text};
 
 use rayon::prelude::*;
+use stream::engine::FontCache;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Extract all text from a PDF file using the full stream engine and text assembly.
 pub fn extract_text(path: &std::path::Path) -> Result<String> {
@@ -60,12 +63,18 @@ pub fn extract_text_with_config(
         })
         .collect();
 
+    // Shared font cache across pages within the same document
+    let font_cache: FontCache = Arc::new(Mutex::new(HashMap::new()));
+
     // Process pages in parallel
     let doc_arc = doc.inner_arc();
     let page_texts: Vec<(u32, String)> = page_data
         .into_par_iter()
         .filter_map(|(page_num, content_bytes, resources_dict, rotation, media_box)| {
-            let mut engine = stream::engine::StreamEngine::new(doc_arc.clone());
+            let mut engine = stream::engine::StreamEngine::with_font_cache(
+                doc_arc.clone(),
+                font_cache.clone(),
+            );
             engine.set_page_info(rotation, media_box[2], media_box[3]);
             if let Some(ref res_dict) = resources_dict {
                 engine.load_resources(res_dict);
@@ -135,6 +144,7 @@ pub fn extract_text_sequential(
 ) -> Result<String> {
     let doc = PdfDocument::open(path)?;
     let mut output = String::new();
+    let font_cache: FontCache = Arc::new(Mutex::new(HashMap::new()));
 
     for page_num in 0..doc.page_count() {
         let page = doc.page(page_num)?;
@@ -147,7 +157,10 @@ pub fn extract_text_sequential(
         let rotation = page.rotation().unwrap_or(0) as i32;
         let media_box = page.media_box()?;
 
-        let mut engine = stream::engine::StreamEngine::new(doc.inner_arc());
+        let mut engine = stream::engine::StreamEngine::with_font_cache(
+            doc.inner_arc(),
+            font_cache.clone(),
+        );
         engine.set_page_info(rotation, media_box[2], media_box[3]);
         if let Some(ref res) = resources {
             engine.load_resources(res.dictionary());

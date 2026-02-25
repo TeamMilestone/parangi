@@ -5,9 +5,12 @@
 //! and extract text positioning information.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use lopdf::{content::Content, Document, Object, ObjectId};
+use lopdf::{Document, Object, ObjectId};
+
+/// Thread-safe font cache keyed by ObjectId.
+pub type FontCache = Arc<Mutex<HashMap<ObjectId, PdfFont>>>;
 
 use super::graphics_state::GraphicsStateStack;
 use super::matrix::Matrix;
@@ -67,6 +70,9 @@ pub struct StreamEngine {
     actual_text: Option<String>,
     /// Whether we're still waiting for the first TextPosition within an ActualText span.
     first_actual_text_position: bool,
+
+    /// Optional cross-page font cache (keyed by ObjectId).
+    font_cache: Option<FontCache>,
 }
 
 impl StreamEngine {
@@ -85,6 +91,26 @@ impl StreamEngine {
             marked_content_stack: Vec::new(),
             actual_text: None,
             first_actual_text_position: false,
+            font_cache: None,
+        }
+    }
+
+    /// Create a new stream engine with a shared font cache.
+    pub fn with_font_cache(doc: Arc<Document>, cache: FontCache) -> Self {
+        Self {
+            doc,
+            state_stack: GraphicsStateStack::new(),
+            fonts: HashMap::new(),
+            xobject_refs: HashMap::new(),
+            text_positions: Vec::new(),
+            page_rotation: 0,
+            page_width: 612.0,
+            page_height: 792.0,
+            nesting_level: 0,
+            marked_content_stack: Vec::new(),
+            actual_text: None,
+            first_actual_text_position: false,
+            font_cache: Some(cache),
         }
     }
 
@@ -102,7 +128,7 @@ impl StreamEngine {
 
     /// Load fonts and XObject references from a resources dictionary.
     pub fn load_resources(&mut self, resources_dict: &lopdf::Dictionary) {
-        self.fonts = Self::load_fonts_from_resources(&self.doc, resources_dict);
+        self.fonts = Self::load_fonts_from_resources(&self.doc, resources_dict, &self.font_cache);
         self.xobject_refs = Self::load_xobject_refs(&self.doc, resources_dict);
     }
 
@@ -112,208 +138,17 @@ impl StreamEngine {
             return Ok(());
         }
 
-        let has_nul = content_bytes.contains(&0u8);
-
-        if !has_nul {
-            // Fast path: no NUL bytes, try direct decode then strip inline images
-            if let Ok(content) = Content::decode(content_bytes) {
-                return self.process_operations(&content.operations);
+        // Use the fast streaming parser — handles NUL bytes and inline images natively
+        super::content_parser::parse_content_stream(content_bytes, |operator, operands| {
+            if let Err(e) = self.process_operator(operator, operands) {
+                log::warn!("operator '{}' error: {}", operator, e);
             }
-            let cleaned = Self::strip_unparseable_content(content_bytes);
-            if let Ok(content) = Content::decode(&cleaned) {
-                return self.process_operations(&content.operations);
-            }
-            return Err(PdfError::Parse(
-                "content decode: invalid content stream".into(),
-            ));
-        }
-
-        // Content has NUL bytes. lopdf's Content::decode may silently truncate
-        // at NUL positions, so we must clean the content first.
-
-        // Try 1: strip inline images and NUL bytes, then decode
-        let cleaned = Self::strip_unparseable_content(content_bytes);
-        if let Ok(content) = Content::decode(&cleaned) {
-            return self.process_operations(&content.operations);
-        }
-
-        // Try 2: split on NUL runs and decode each chunk independently
-        self.process_chunks(content_bytes)
-    }
-
-    /// Process decoded operations.
-    fn process_operations(
-        &mut self,
-        operations: &[lopdf::content::Operation],
-    ) -> Result<()> {
-        for op in operations {
-            if let Err(e) = self.process_operator(&op.operator, &op.operands) {
-                log::warn!("operator '{}' error: {}", op.operator, e);
-            }
-        }
-        Ok(())
-    }
-
-    /// Strip inline images (BI...ID...EI) and NUL bytes from content streams.
-    ///
-    /// lopdf's Content::decode cannot parse inline image data (binary content
-    /// between ID and EI operators). Since we only need text operators, we can
-    /// safely remove inline images. NUL byte padding from HWP→PDF converters
-    /// is also stripped — but NUL bytes inside parenthesized string literals
-    /// `(...)` are preserved, as they may be valid CID character codes.
-    fn strip_unparseable_content(content_bytes: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(content_bytes.len());
-        let mut i = 0;
-        let mut paren_depth = 0u32;
-
-        while i < content_bytes.len() {
-            let b = content_bytes[i];
-
-            // Track parenthesized string literal depth (handling escapes)
-            if paren_depth > 0 {
-                // Inside a string literal: keep everything including NUL
-                result.push(b);
-                if b == b'\\' {
-                    // Escape sequence: copy next byte too
-                    i += 1;
-                    if i < content_bytes.len() {
-                        result.push(content_bytes[i]);
-                    }
-                } else if b == b'(' {
-                    paren_depth += 1;
-                } else if b == b')' {
-                    paren_depth -= 1;
-                }
-                i += 1;
-                continue;
-            }
-
-            // Outside string literals
-            if b == b'(' {
-                paren_depth = 1;
-                result.push(b);
-                i += 1;
-                continue;
-            }
-
-            // Skip NUL bytes outside strings
-            if b == 0 {
-                i += 1;
-                continue;
-            }
-
-            // Check for BI (Begin Inline Image) operator
-            if i + 2 < content_bytes.len()
-                && b == b'B'
-                && content_bytes[i + 1] == b'I'
-                && (i == 0 || content_bytes[i - 1].is_ascii_whitespace())
-                && content_bytes[i + 2].is_ascii_whitespace()
-            {
-                if let Some(ei_pos) = Self::find_ei(&content_bytes[i..]) {
-                    i += ei_pos;
-                    if i < content_bytes.len() && content_bytes[i].is_ascii_whitespace() {
-                        i += 1;
-                    }
-                    continue;
-                }
-            }
-
-            result.push(b);
-            i += 1;
-        }
-
-        result
-    }
-
-    /// Find the position after EI (End Inline Image) in the given slice.
-    /// Returns the offset past "EI\n" or "EI " relative to the start of the slice.
-    fn find_ei(data: &[u8]) -> Option<usize> {
-        // Skip past BI
-        let mut i = 2;
-        // Find ID (Image Data) marker
-        while i + 2 < data.len() {
-            if data[i] == b'I'
-                && data[i + 1] == b'D'
-                && (i == 0 || data[i - 1].is_ascii_whitespace())
-                && data[i + 2].is_ascii_whitespace()
-            {
-                // Skip past ID + whitespace + binary data
-                i += 3; // past "ID "
-                // Now scan for EI preceded by whitespace
-                while i + 2 < data.len() {
-                    if data[i] == b'E'
-                        && data[i + 1] == b'I'
-                        && data[i - 1].is_ascii_whitespace()
-                        && (i + 2 >= data.len() || data[i + 2].is_ascii_whitespace())
-                    {
-                        return Some(i + 2);
-                    }
-                    i += 1;
-                }
-                // No EI found — skip to end
-                return Some(data.len());
-            }
-            i += 1;
-        }
-        None
-    }
-
-    /// Split content on NUL byte runs and decode each chunk independently.
-    fn process_chunks(&mut self, content_bytes: &[u8]) -> Result<()> {
-        let mut processed_any = false;
-        let mut start = 0;
-
-        while start < content_bytes.len() {
-            // Skip NUL bytes
-            if content_bytes[start] == 0 {
-                start += 1;
-                continue;
-            }
-
-            // Find end of non-NUL chunk (stop at runs of 3+ NUL bytes)
-            let mut end = start + 1;
-            while end < content_bytes.len() {
-                if content_bytes[end] == 0 {
-                    let nul_run = content_bytes[end..]
-                        .iter()
-                        .take_while(|&&b| b == 0)
-                        .count();
-                    if nul_run >= 3 {
-                        break;
-                    }
-                    end += nul_run;
-                } else {
-                    end += 1;
-                }
-            }
-
-            let chunk = &content_bytes[start..end];
-            if !chunk.is_empty() {
-                // Try direct decode, then with inline image stripping
-                let content = Content::decode(chunk).or_else(|_| {
-                    let cleaned = Self::strip_unparseable_content(chunk);
-                    Content::decode(&cleaned)
-                });
-                if let Ok(content) = content {
-                    for op in &content.operations {
-                        if let Err(e) = self.process_operator(&op.operator, &op.operands) {
-                            log::warn!("operator '{}' error: {}", op.operator, e);
-                        }
-                    }
-                    processed_any = true;
-                }
-            }
-            start = end;
-        }
-
-        if processed_any {
             Ok(())
-        } else {
-            Err(PdfError::Parse(
-                "content decode: no valid chunks found".into(),
-            ))
-        }
+        })
     }
+
+    // Legacy methods (strip_unparseable_content, process_chunks, find_ei)
+    // removed: fast content_parser handles NUL bytes and inline images natively.
 
     /// Get the collected text positions.
     pub fn text_positions(&self) -> &[TextPosition] {
@@ -785,7 +620,7 @@ impl StreamEngine {
             _ => return (None, None),
         };
 
-        let fonts = Self::load_fonts_from_resources(&self.doc, res_dict);
+        let fonts = Self::load_fonts_from_resources(&self.doc, res_dict, &self.font_cache);
         let xobject_refs = Self::load_xobject_refs(&self.doc, res_dict);
         (Some(fonts), Some(xobject_refs))
     }
@@ -794,6 +629,7 @@ impl StreamEngine {
     fn load_fonts_from_resources(
         doc: &Document,
         resources_dict: &lopdf::Dictionary,
+        font_cache: &Option<FontCache>,
     ) -> HashMap<Vec<u8>, PdfFont> {
         let mut fonts = HashMap::new();
 
@@ -823,8 +659,29 @@ impl StreamEngine {
                 Object::Dictionary(d) => (d, (0, 0)),
                 _ => continue,
             };
+
+            // Check cache first (only for referenced fonts with valid ObjectId)
+            if oid != (0, 0) {
+                if let Some(cache) = font_cache {
+                    if let Ok(cache_guard) = cache.lock() {
+                        if let Some(cached_font) = cache_guard.get(&oid) {
+                            fonts.insert(name.clone(), cached_font.clone());
+                            continue;
+                        }
+                    }
+                }
+            }
+
             match PdfFont::from_dict(doc, dict, oid) {
                 Ok(font) => {
+                    // Store in cache
+                    if oid != (0, 0) {
+                        if let Some(cache) = font_cache {
+                            if let Ok(mut cache_guard) = cache.lock() {
+                                cache_guard.insert(oid, font.clone());
+                            }
+                        }
+                    }
                     fonts.insert(name.clone(), font);
                 }
                 Err(e) => {

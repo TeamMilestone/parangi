@@ -15,6 +15,7 @@ use type0_font::Type0Font;
 use type3_font::Type3Font;
 
 /// A PDF font that can decode character codes to Unicode text.
+#[derive(Clone)]
 pub enum PdfFont {
     /// Simple fonts: Type1, TrueType, MMType1.
     Simple(SimpleFont),

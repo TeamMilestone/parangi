@@ -847,24 +847,31 @@ impl StreamEngine {
     /// Process a text string byte-by-byte, creating TextPosition for each glyph.
     ///
     /// Ported from PDFStreamEngine.showText() + LegacyPDFStreamEngine.showGlyph().
+    ///
+    /// Optimized: TRM rotation/scale components and scaling factors are computed
+    /// once before the loop (they're constant since only Tm's translation changes).
+    /// TRM translation is re-derived each iteration from locally-tracked Tm values
+    /// using the same FP operation order as the full matrix multiply, ensuring
+    /// bit-identical results. This eliminates 2 matrix multiplies + 2 sqrts per glyph.
     fn show_text(&mut self, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
 
-        // Read text state values upfront to avoid borrow issues.
+        // === Pre-loop: extract all state and precompute constants ===
         let gs = self.state_stack.current();
         let font_size = gs.text_state.font_size;
         let hs = gs.text_state.horizontal_scaling_fraction();
         let char_spacing = gs.text_state.character_spacing;
         let word_spacing = gs.text_state.word_spacing;
+        let rise = gs.text_state.rise;
 
         // Cache font reference (Arc clone is cheap — avoids 3 HashMap lookups per glyph).
         let font = gs.text_state.font_name.as_ref()
             .and_then(|name| self.fonts.get(name))
             .cloned();
 
-        // Cache space_width and actual_text for use in loop.
+        // Cache space_width for use in loop.
         let cached_space_width = if let Some(ref f) = font {
             let sw = f.get_width(32) / 1000.0;
             if sw > 0.0 {
@@ -876,13 +883,50 @@ impl StreamEngine {
         } else {
             0.25
         };
+
+        // Extract Tm and CTM (Tm is identity if not set, e.g. outside BT..ET)
+        let tm = gs.text_matrix.unwrap_or(Matrix::IDENTITY);
+        let ctm = gs.ctm;
+
+        // Compute initial TRM = [fs*hs,0,0; 0,fs,0; 0,rise,1] × Tm × CTM
+        // Only Tm's translation changes in the loop (via translate(tx, 0)),
+        // so TRM's rotation/scale (a,b,c,d) are constant.
+        let params = Matrix::from_values(font_size * hs, 0.0, 0.0, font_size, 0.0, rise);
+        let trm_template = params.multiply(&tm).multiply(&ctm);
+
+        // Scaling factors depend only on TRM's a,b,c,d — constant for entire loop.
+        let trm_scale_x = trm_template.scaling_factor_x().abs();
+        let trm_scale_y = trm_template.scaling_factor_y().abs();
+        let dy_display = trm_scale_y;
+        let space_width_display = (cached_space_width * trm_scale_x).abs();
+        let font_size_in_pt = (font_size * tm.scaling_factor_x()) as i32;
+
+        // Constant Tm rotation/scale + rise contributions.
+        // TRM row2 = (params×Tm) row2 × CTM, where:
+        //   (params×Tm) row2 = [rise*tm[3]+tm_tx, rise*tm[4]+tm_ty, 1]
+        // Only tm_tx, tm_ty change per glyph.
+        let tm_a = tm.scale_x();     // tm[0]
+        let tm_b = tm.shear_y();     // tm[1]
+        let rise_tm3 = rise * tm.shear_x();  // rise * tm[3], constant
+        let rise_tm4 = rise * tm.scale_y();  // rise * tm[4], constant
+        let ctm_a = ctm.scale_x();   // ctm[0]
+        let ctm_b = ctm.shear_y();   // ctm[1]
+        let ctm_c = ctm.shear_x();   // ctm[3]
+        let ctm_d = ctm.scale_y();   // ctm[4]
+        let ctm_tx = ctm.translate_x();
+        let ctm_ty = ctm.translate_y();
+
+        // Track Tm translation locally (matches state.text_matrix.translate() exactly)
+        let mut tm_tx = tm.translate_x();
+        let mut tm_ty = tm.translate_y();
+
+        // === Glyph processing loop ===
         let mut offset = 0;
         while offset < bytes.len() {
             // --- Read character code ---
             let (code, code_length) = if let Some(ref f) = font {
                 f.read_code(bytes, offset)
             } else {
-                // No font: single-byte fallback
                 (bytes[offset] as u32, 1)
             };
 
@@ -891,8 +935,19 @@ impl StreamEngine {
             }
             offset += code_length;
 
-            // --- Compute text rendering matrix BEFORE glyph ---
-            let trm = self.compute_text_rendering_matrix();
+            // --- Derive TRM translation from current Tm ---
+            // Same FP operation order as full matrix multiply:
+            //   row2 = [rise*tm[3]+tm_tx, rise*tm[4]+tm_ty, 1]
+            //   TRM_tx = row2[0]*ctm[0] + row2[1]*ctm[3] + ctm[6]
+            let row2_0 = rise_tm3 + tm_tx;
+            let row2_1 = rise_tm4 + tm_ty;
+            let trm_tx = row2_0 * ctm_a + row2_1 * ctm_c + ctm_tx;
+            let trm_ty = row2_0 * ctm_b + row2_1 * ctm_d + ctm_ty;
+
+            // Build TRM (constant a,b,c,d from template + derived tx,ty)
+            let mut trm = trm_template;
+            trm.set(2, 0, trm_tx);
+            trm.set(2, 1, trm_ty);
 
             // --- Get glyph width (text space, 1/1000 units) ---
             let width_1000 = if let Some(ref f) = font {
@@ -902,28 +957,13 @@ impl StreamEngine {
             };
             let displacement_x = width_1000 / 1000.0;
 
-            // --- Compute end position (visual glyph extent) ---
-            // td = displacement × fontSize × horizontalScaling
+            // --- End position (same FP ops as original inline calculation) ---
             let tx_visual = displacement_x * font_size * hs;
-            // Inline: translate(tx_visual,0) × Tm × CTM
-            // td×Tm only changes Tm's translation: tx' = tx_visual*Tm.a + Tm.tx,
-            // ty' = tx_visual*Tm.b + Tm.ty. Then multiply by CTM for display coords.
-            let gs2 = self.state_stack.current();
-            let tm = gs2.text_matrix.as_ref().unwrap();
-            let ctm = &gs2.ctm;
-            let tdtm_tx = tx_visual * tm.get(0, 0) + tm.translate_x();
-            let tdtm_ty = tx_visual * tm.get(0, 1) + tm.translate_y();
-            let end_x = tdtm_tx * ctm.get(0, 0) + tdtm_ty * ctm.get(1, 0) + ctm.translate_x();
-            let end_y = tdtm_tx * ctm.get(0, 1) + tdtm_ty * ctm.get(1, 1) + ctm.translate_y();
-
-            // --- Width in display space ---
-            let dx_display = end_x - trm.translate_x();
-
-            // --- Font height in display space ---
-            let dy_display = trm.scaling_factor_y().abs();
-
-            // --- Space width in display space (cached) ---
-            let space_width_display = (cached_space_width * trm.scaling_factor_x()).abs();
+            let tdtm_tx = tx_visual * tm_a + tm_tx;
+            let tdtm_ty = tx_visual * tm_b + tm_ty;
+            let end_x = tdtm_tx * ctm_a + tdtm_ty * ctm_c + ctm_tx;
+            let end_y = tdtm_tx * ctm_b + tdtm_ty * ctm_d + ctm_ty;
+            let dx_display = end_x - trm_tx;
 
             // --- Unicode mapping ---
             let unicode: compact_str::CompactString = if let Some(ref f) = font {
@@ -939,18 +979,12 @@ impl StreamEngine {
                 }
             };
 
-            // --- Font size in points ---
-            let tm_ref = self.state_stack.current().text_matrix.as_ref().unwrap();
-            let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
-
             // --- Apply ActualText replacement if active ---
             let final_unicode: compact_str::CompactString = if let Some(ref at) = self.actual_text {
                 if self.first_actual_text_position {
-                    // First glyph in ActualText span: use the ActualText value
                     self.first_actual_text_position = false;
                     at.as_str().into()
                 } else {
-                    // Subsequent glyphs in ActualText span: suppress (empty string)
                     compact_str::CompactString::default()
                 }
             } else {
@@ -978,7 +1012,6 @@ impl StreamEngine {
             }
 
             // --- Advance text matrix ---
-            // tx = (displacement × fontSize + charSpacing + wordSpacing) × Hs
             let word_space = if code_length == 1 && code == 32 {
                 word_spacing
             } else {
@@ -986,10 +1019,15 @@ impl StreamEngine {
             };
             let total_tx = (displacement_x * font_size + char_spacing + word_space) * hs;
 
+            // Update state's Tm (needed for subsequent operators / next show_text call)
             let gs = self.state_stack.current_mut();
-            if let Some(ref mut tm) = gs.text_matrix {
-                tm.translate(total_tx, 0.0);
+            if let Some(ref mut state_tm) = gs.text_matrix {
+                state_tm.translate(total_tx, 0.0);
             }
+
+            // Advance local Tm translation (same arithmetic as Matrix::translate)
+            tm_tx += total_tx * tm_a;
+            tm_ty += total_tx * tm_b;
         }
 
         Ok(())
@@ -1011,23 +1049,6 @@ impl StreamEngine {
         }
     }
 
-    /// Compute the text rendering matrix: Tfs × Th × Tm × CTM.
-    fn compute_text_rendering_matrix(&self) -> Matrix {
-        let gs = self.state_stack.current();
-        let font_size = gs.text_state.font_size;
-        let hs = gs.text_state.horizontal_scaling_fraction();
-        let rise = gs.text_state.rise;
-
-        // Text rendering matrix per PDF spec (section 9.4.4):
-        // TRM = [fontSize×Hs 0 0; 0 fontSize 0; 0 rise 1] × Tm × CTM
-        let params = Matrix::from_values(font_size * hs, 0.0, 0.0, font_size, 0.0, rise);
-
-        if let Some(ref tm) = gs.text_matrix {
-            params.multiply(tm).multiply(&gs.ctm)
-        } else {
-            params.multiply(&gs.ctm)
-        }
-    }
 }
 
 #[cfg(test)]

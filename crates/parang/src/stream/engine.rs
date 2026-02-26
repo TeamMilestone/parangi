@@ -967,7 +967,7 @@ impl StreamEngine {
 
             // --- Unicode mapping ---
             let unicode: compact_str::CompactString = if let Some(ref f) = font {
-                f.to_unicode(code).unwrap_or_default().into()
+                f.to_unicode(code).unwrap_or_default()
             } else {
                 // Fallback: interpret as Latin-1
                 if let Some(ch) = char::from_u32(code) {

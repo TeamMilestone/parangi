@@ -75,14 +75,14 @@ impl Type3Font {
     }
 
     /// Decode a character code to Unicode.
-    pub fn to_unicode(&self, code: u32) -> Option<String> {
+    pub fn to_unicode(&self, code: u32) -> Option<compact_str::CompactString> {
         // Tier 1: ToUnicode CMap
         if let Some(ref cmap) = self.to_unicode_cmap {
             if let Some(unicode) = cmap.to_unicode(code, 1) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
             if let Some(unicode) = cmap.to_unicode(code, 2) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
         }
 
@@ -93,7 +93,7 @@ impl Type3Font {
             }
             let gl = &*glyph_list::DEFAULT;
             if let Some(unicode) = gl.to_unicode(name) {
-                return Some(unicode);
+                return Some(unicode.into());
             }
         }
 
@@ -102,7 +102,7 @@ impl Type3Font {
         // custom glyph names not in the Adobe Glyph List.
         if let Some(ch) = char::from_u32(code) {
             if !ch.is_control() || ch == ' ' || ch == '\t' {
-                return Some(ch.to_string());
+                return super::char_to_compact(code);
             }
         }
 
@@ -190,7 +190,7 @@ mod tests {
         let font = Type3Font::from_dict(&doc, &dict).unwrap();
 
         assert_eq!(font.base_font(), "CustomType3");
-        assert_eq!(font.to_unicode(65), Some("A".to_string()));
+        assert_eq!(font.to_unicode(65), Some(compact_str::CompactString::from("A")));
         assert_eq!(font.get_width(32), 500.0);
         assert_eq!(font.get_width(65), 533.0);
     }

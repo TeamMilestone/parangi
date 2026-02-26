@@ -7,6 +7,7 @@
 
 use lopdf::{Document, Object};
 
+use super::char_to_compact;
 use crate::cos_helpers::{name_to_string, obj_to_f32, DocumentExt};
 use crate::encoding::cmap::CMap;
 use crate::encoding::cmap_manager;
@@ -156,23 +157,23 @@ impl Type0Font {
     /// 1. ToUnicode CMap (code → Unicode)
     /// 2. Encoding CMap + UCS2 CMap (code → CID → Unicode) for CJK
     /// 3. Identity mapping fallback
-    pub fn to_unicode(&self, code: u32) -> Option<String> {
+    pub fn to_unicode(&self, code: u32) -> Option<compact_str::CompactString> {
         // Tier 1: ToUnicode CMap
         if let Some(ref cmap) = self.to_unicode_cmap {
             // Try 2-byte first (most common for CJK)
             if let Some(unicode) = cmap.to_unicode(code, 2) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
             // Try 1-byte
             if let Some(unicode) = cmap.to_unicode(code, 1) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
             // Try 3 and 4 byte
             if let Some(unicode) = cmap.to_unicode(code, 3) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
             if let Some(unicode) = cmap.to_unicode(code, 4) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
         }
 
@@ -182,27 +183,23 @@ impl Type0Font {
                 let cid = self.code_to_cid(code);
                 // UCS2 CMap maps CID → Unicode using 2-byte codes
                 if let Some(unicode) = ucs2.to_unicode(cid, 2) {
-                    return Some(unicode.to_string());
+                    return Some(unicode.into());
                 }
                 if let Some(unicode) = ucs2.to_unicode(cid, 1) {
-                    return Some(unicode.to_string());
+                    return Some(unicode.into());
                 }
             }
         }
 
         // Tier 3: Identity fallback (if ToUnicode exists but is non-predefined)
         if self.to_unicode_cmap.is_some() && !self.is_cmap_predefined {
-            if let Some(ch) = char::from_u32(code) {
-                return Some(ch.to_string());
-            }
+            return char_to_compact(code);
         }
 
         // Tier 4: Identity-H/V encoding without ToUnicode or UCS2 → CID is Unicode
         if self.encoding_cmap.name.starts_with("Identity") {
             let cid = self.code_to_cid(code);
-            if let Some(ch) = char::from_u32(cid) {
-                return Some(ch.to_string());
-            }
+            return char_to_compact(cid);
         }
 
         None
@@ -595,8 +592,8 @@ mod tests {
             widths: CidWidths::new(),
         };
 
-        assert_eq!(font.to_unicode(0x0041), Some("A".to_string()));
-        assert_eq!(font.to_unicode(0xAC00), Some("\u{AC00}".to_string()));
+        assert_eq!(font.to_unicode(0x0041), Some(compact_str::CompactString::from("A")));
+        assert_eq!(font.to_unicode(0xAC00), Some(compact_str::CompactString::from("\u{AC00}")));
     }
 
     #[test]

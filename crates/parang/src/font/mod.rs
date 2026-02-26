@@ -6,6 +6,7 @@ pub mod simple_font;
 pub mod type0_font;
 pub mod type3_font;
 
+use compact_str::CompactString;
 use lopdf::{Document, ObjectId};
 
 use crate::cos_helpers::name_to_string;
@@ -63,7 +64,8 @@ impl PdfFont {
     }
 
     /// Decode a single character code to a Unicode string.
-    pub fn to_unicode(&self, code: u32) -> Option<String> {
+    /// Returns CompactString to avoid per-glyph heap allocation (most glyphs ≤24 bytes).
+    pub fn to_unicode(&self, code: u32) -> Option<CompactString> {
         match self {
             PdfFont::Simple(f) => f.to_unicode(code),
             PdfFont::Type0(f) => f.to_unicode(code),
@@ -109,4 +111,12 @@ impl PdfFont {
             PdfFont::Type3(f) => f.base_font(),
         }
     }
+}
+
+/// Convert a Unicode codepoint (u32) to CompactString without heap allocation.
+pub(crate) fn char_to_compact(code: u32) -> Option<CompactString> {
+    let ch = char::from_u32(code)?;
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    Some(CompactString::from(s as &str))
 }

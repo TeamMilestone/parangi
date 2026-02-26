@@ -95,16 +95,16 @@ impl SimpleFont {
     /// Fallback chain:
     /// 1. ToUnicode CMap
     /// 2. Encoding → glyph name → GlyphList → Unicode
-    pub fn to_unicode(&self, code: u32) -> Option<String> {
+    pub fn to_unicode(&self, code: u32) -> Option<compact_str::CompactString> {
         // Tier 1: ToUnicode CMap (highest priority)
         if let Some(ref cmap) = self.to_unicode_cmap {
             // Simple fonts use 1-byte codes
             if let Some(unicode) = cmap.to_unicode(code, 1) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
             // Also try 2-byte (some CMaps use 2-byte codes even for simple fonts)
             if let Some(unicode) = cmap.to_unicode(code, 2) {
-                return Some(unicode.to_string());
+                return Some(unicode.into());
             }
         }
 
@@ -115,7 +115,7 @@ impl SimpleFont {
             }
             let gl = self.glyph_list();
             if let Some(unicode) = gl.to_unicode(name) {
-                return Some(unicode);
+                return Some(unicode.into());
             }
         }
 
@@ -333,9 +333,9 @@ mod tests {
         let font = SimpleFont::from_dict(&doc, &dict, "Type1").unwrap();
 
         // 65 = 'A' in WinAnsiEncoding
-        assert_eq!(font.to_unicode(65), Some("A".to_string()));
+        assert_eq!(font.to_unicode(65), Some(compact_str::CompactString::from("A")));
         // 32 = 'space' in WinAnsiEncoding
-        assert_eq!(font.to_unicode(32), Some(" ".to_string()));
+        assert_eq!(font.to_unicode(32), Some(compact_str::CompactString::from(" ")));
     }
 
     #[test]
@@ -388,6 +388,6 @@ mod tests {
 
         // Without explicit encoding, should default to StandardEncoding
         // code 65 = 'A' in StandardEncoding
-        assert_eq!(font.to_unicode(65), Some("A".to_string()));
+        assert_eq!(font.to_unicode(65), Some(compact_str::CompactString::from("A")));
     }
 }

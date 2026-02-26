@@ -13,18 +13,12 @@ use super::TextPosition;
 ///
 /// Uses direction-adjusted coordinates (origin at upper-left).
 /// Strict total order: direction → Y (top to bottom) → X (left to right).
-pub fn sort_positions(positions: &mut [TextPosition]) {
-    positions.sort_unstable_by(|a, b| compare_positions(a, b));
-}
-
-/// Compare two TextPositions for reading order.
 ///
-/// Strict total order using f32::total_cmp (handles NaN).
-fn compare_positions(a: &TextPosition, b: &TextPosition) -> std::cmp::Ordering {
-    a.direction()
-        .total_cmp(&b.direction())
-        .then_with(|| a.y_dir_adj().total_cmp(&b.y_dir_adj()))
-        .then_with(|| a.x_dir_adj().total_cmp(&b.x_dir_adj()))
+/// Uses `sort_by_cached_key` to call `sort_key()` exactly ONCE per element,
+/// avoiding the 6× redundant `direction()` calls of the previous `sort_unstable_by` approach.
+/// Each comparison during sort operates on precomputed (u32, u32, u32) tuples.
+pub fn sort_positions(positions: &mut [TextPosition]) {
+    positions.sort_by_cached_key(|p| p.sort_key());
 }
 
 #[cfg(test)]

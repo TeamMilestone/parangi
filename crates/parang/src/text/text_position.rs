@@ -120,6 +120,81 @@ impl TextPosition {
             self.individual_width.abs()
         }
     }
+
+    /// Compute all direction-adjusted values in ONE direction() call.
+    ///
+    /// Returns (x_adj, y_adj, width_adj, height_adj).
+    /// Used to avoid 4× redundant direction() calls in the assembly loop.
+    #[inline]
+    pub fn dir_adj_all(&self) -> (f32, f32, f32, f32) {
+        let dir = self.direction();
+        match dir as i32 {
+            0 => (
+                self.x(),
+                self.page_height - self.y(),
+                self.individual_width.abs(),
+                self.max_height,
+            ),
+            90 => (
+                self.page_height - self.y(),
+                self.x(),
+                self.max_height,
+                self.individual_width.abs(),
+            ),
+            180 => (
+                self.page_width - self.x(),
+                self.y(),
+                self.individual_width.abs(),
+                self.max_height,
+            ),
+            270 => (
+                self.y(),
+                self.page_width - self.x(),
+                self.max_height,
+                self.individual_width.abs(),
+            ),
+            _ => (
+                self.x(),
+                self.page_height - self.y(),
+                self.individual_width.abs(),
+                self.max_height,
+            ),
+        }
+    }
+
+    /// Compute a sort key (dir, y_adj, x_adj) as (u32, u32, u32) for cached sorting.
+    ///
+    /// Uses f32 total-order bit representation so that (u32, u32, u32) implements Ord
+    /// with the same semantics as total_cmp. Calls direction() exactly ONCE.
+    #[inline]
+    pub fn sort_key(&self) -> (u32, u32, u32) {
+        let dir = self.direction();
+        let (y_adj, x_adj) = match dir as i32 {
+            0 => (self.page_height - self.y(), self.x()),
+            90 => (self.x(), self.page_height - self.y()),
+            180 => (self.y(), self.page_width - self.x()),
+            270 => (self.page_width - self.x(), self.y()),
+            _ => (self.page_height - self.y(), self.x()),
+        };
+        (f32_total_bits(dir), f32_total_bits(y_adj), f32_total_bits(x_adj))
+    }
+}
+
+/// Convert f32 to u32 that preserves total order (equivalent to f32::total_cmp).
+///
+/// For positive f32 values (dir ∈ {0,90,180,270}, coords typically positive),
+/// this is equivalent to .to_bits() with sign bit set. For negative values,
+/// all bits are flipped so they sort before positive values.
+#[inline]
+fn f32_total_bits(f: f32) -> u32 {
+    let bits = f.to_bits();
+    // If sign bit is 0 (positive or +0): set sign bit to put after negatives
+    // If sign bit is 1 (negative or -0): flip all bits to reverse order
+    if bits >> 31 == 0 {
+        bits | 0x8000_0000
+    } else {
+        !bits
+    }
 }
 
 #[cfg(test)]

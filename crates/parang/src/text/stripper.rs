@@ -121,10 +121,8 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
     let mut pending_word_separator = false;
 
     for pos in positions.iter() {
-        let pos_x = pos.x_dir_adj();
-        let pos_y = pos.y_dir_adj();
-        let pos_width = pos.width_dir_adj();
-        let pos_height = pos.height_dir_adj();
+        // Compute all dir-adjusted coords with a single direction() call (4× fewer calls).
+        let (pos_x, pos_y, pos_width, pos_height) = pos.dir_adj_all();
         let word_spacing = pos.space_width;
 
         if let Some(last) = last_position {

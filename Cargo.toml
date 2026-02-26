@@ -17,6 +17,7 @@ authors = ["Wonsup Lee <onesup.lee@gmail.com>"]
 lopdf = { path = "../lopdf" }
 rayon = "1.10"
 memmap2 = "0.9"
+compact_str = "0.8"
 encoding_rs = "0.8"
 unicode-normalization = "0.1"
 unicode-bidi = "0.3"

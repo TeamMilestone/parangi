@@ -102,7 +102,7 @@ pub fn merge_diacritics_in_place(positions: &mut Vec<super::TextPosition>) {
             let mark = std::mem::take(&mut positions[i].unicode);
             positions[i - 1].unicode.push_str(&mark);
             let normalized: String = positions[i - 1].unicode.nfc().collect();
-            positions[i - 1].unicode = normalized;
+            positions[i - 1].unicode = normalized.into();
         }
         i += 1;
     }

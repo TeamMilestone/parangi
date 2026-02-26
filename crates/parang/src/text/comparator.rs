@@ -35,7 +35,7 @@ mod tests {
     fn make_tp(unicode: &str, x: f32, y: f32, width: f32, height: f32) -> TextPosition {
         let trm = Matrix::from_values(height, 0.0, 0.0, height, x, y);
         TextPosition {
-            unicode: unicode.to_string(),
+            unicode: unicode.into(),
             char_code: 0,
             text_matrix: trm,
             end_x: x + width,

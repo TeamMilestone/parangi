@@ -562,7 +562,7 @@ mod tests {
         // Note: y in device space. y_dir_adj = page_height - y for direction 0
         let trm = Matrix::from_values(height, 0.0, 0.0, height, x, y);
         TextPosition {
-            unicode: unicode.to_string(),
+            unicode: unicode.into(),
             char_code: 0,
             text_matrix: trm,
             end_x: x + width,

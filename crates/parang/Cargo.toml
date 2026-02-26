@@ -11,6 +11,7 @@ description = "PDF text extraction library — Rust port of Apache PDFBox"
 lopdf = { workspace = true }
 rayon = { workspace = true }
 memmap2 = { workspace = true }
+compact_str = { workspace = true }
 encoding_rs = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-bidi = { workspace = true }

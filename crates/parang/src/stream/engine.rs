@@ -5,7 +5,7 @@
 //! and extract text positioning information.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use lopdf::{Document, Object, ObjectId};
 
@@ -926,14 +926,16 @@ impl StreamEngine {
             let space_width_display = (cached_space_width * trm.scaling_factor_x()).abs();
 
             // --- Unicode mapping ---
-            let unicode = if let Some(ref f) = font {
-                f.to_unicode(code).unwrap_or_default()
+            let unicode: compact_str::CompactString = if let Some(ref f) = font {
+                f.to_unicode(code).unwrap_or_default().into()
             } else {
                 // Fallback: interpret as Latin-1
                 if let Some(ch) = char::from_u32(code) {
-                    ch.to_string()
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    compact_str::CompactString::from(s as &str)
                 } else {
-                    String::new()
+                    compact_str::CompactString::default()
                 }
             };
 
@@ -942,14 +944,14 @@ impl StreamEngine {
             let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
 
             // --- Apply ActualText replacement if active ---
-            let final_unicode = if let Some(ref at) = self.actual_text {
+            let final_unicode: compact_str::CompactString = if let Some(ref at) = self.actual_text {
                 if self.first_actual_text_position {
                     // First glyph in ActualText span: use the ActualText value
                     self.first_actual_text_position = false;
-                    at.clone()
+                    at.as_str().into()
                 } else {
                     // Subsequent glyphs in ActualText span: suppress (empty string)
-                    String::new()
+                    compact_str::CompactString::default()
                 }
             } else {
                 unicode

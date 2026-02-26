@@ -2,6 +2,8 @@
 //!
 //! Ported from org.apache.pdfbox.text.TextPosition.
 
+use compact_str::CompactString;
+
 use crate::stream::matrix::Matrix;
 
 /// A single character or glyph extracted from a PDF page,
@@ -9,7 +11,9 @@ use crate::stream::matrix::Matrix;
 #[derive(Debug, Clone)]
 pub struct TextPosition {
     /// Unicode text for this glyph (may be multi-char for ligatures).
-    pub unicode: String,
+    /// Uses CompactString for inline storage of short strings (most glyphs
+    /// are 1-4 bytes), avoiding heap allocation.
+    pub unicode: CompactString,
     /// PDF character code (internal, not Unicode).
     pub char_code: u32,
 
@@ -139,7 +143,7 @@ mod tests {
 
     fn make_tp(unicode: &str, trm: Matrix, end_x: f32, end_y: f32) -> TextPosition {
         TextPosition {
-            unicode: unicode.to_string(),
+            unicode: unicode.into(),
             char_code: 0,
             text_matrix: trm,
             end_x,

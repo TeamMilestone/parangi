@@ -98,7 +98,9 @@ pub fn extract_text_with_config(
     let mut sorted_texts = page_texts;
     sorted_texts.sort_unstable_by_key(|(num, _)| *num);
 
-    let mut output = String::new();
+    let total_len: usize = sorted_texts.iter().map(|(_, t)| t.len()).sum::<usize>()
+        + config.page_separator.len() * sorted_texts.len().saturating_sub(1);
+    let mut output = String::with_capacity(total_len);
     for (_page_num, text) in sorted_texts {
         if !output.is_empty() {
             output.push_str(&config.page_separator);

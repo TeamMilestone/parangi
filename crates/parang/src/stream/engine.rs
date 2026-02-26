@@ -138,6 +138,11 @@ impl StreamEngine {
             return Ok(());
         }
 
+        // Pre-allocate: ~1 glyph per 10 bytes of content stream (heuristic)
+        if self.text_positions.capacity() == 0 {
+            self.text_positions.reserve(content_bytes.len() / 10);
+        }
+
         // Use the fast streaming parser — handles NUL bytes and inline images natively
         super::content_parser::parse_content_stream(content_bytes, |operator, operands| {
             if let Err(e) = self.process_operator(operator, operands) {
@@ -870,8 +875,6 @@ impl StreamEngine {
         } else {
             0.25
         };
-        let actual_text_value = self.actual_text.clone();
-
         let mut offset = 0;
         while offset < bytes.len() {
             // --- Read character code ---
@@ -901,12 +904,16 @@ impl StreamEngine {
             // --- Compute end position (visual glyph extent) ---
             // td = displacement × fontSize × horizontalScaling
             let tx_visual = displacement_x * font_size * hs;
-            let tm = self.state_stack.current().text_matrix.as_ref().unwrap();
-            let ctm = &self.state_stack.current().ctm;
-            let td = Matrix::translate_instance(tx_visual, 0.0);
-            let next_trm = td.multiply(tm).multiply(ctm);
-            let end_x = next_trm.translate_x();
-            let end_y = next_trm.translate_y();
+            // Inline: translate(tx_visual,0) × Tm × CTM
+            // td×Tm only changes Tm's translation: tx' = tx_visual*Tm.a + Tm.tx,
+            // ty' = tx_visual*Tm.b + Tm.ty. Then multiply by CTM for display coords.
+            let gs2 = self.state_stack.current();
+            let tm = gs2.text_matrix.as_ref().unwrap();
+            let ctm = &gs2.ctm;
+            let tdtm_tx = tx_visual * tm.get(0, 0) + tm.translate_x();
+            let tdtm_ty = tx_visual * tm.get(0, 1) + tm.translate_y();
+            let end_x = tdtm_tx * ctm.get(0, 0) + tdtm_ty * ctm.get(1, 0) + ctm.translate_x();
+            let end_y = tdtm_tx * ctm.get(0, 1) + tdtm_ty * ctm.get(1, 1) + ctm.translate_y();
 
             // --- Width in display space ---
             let dx_display = end_x - trm.translate_x();
@@ -934,11 +941,11 @@ impl StreamEngine {
             let font_size_in_pt = (font_size * tm_ref.scaling_factor_x()) as i32;
 
             // --- Apply ActualText replacement if active ---
-            let final_unicode = if actual_text_value.is_some() {
+            let final_unicode = if let Some(ref at) = self.actual_text {
                 if self.first_actual_text_position {
                     // First glyph in ActualText span: use the ActualText value
                     self.first_actual_text_position = false;
-                    actual_text_value.clone().unwrap_or_default()
+                    at.clone()
                 } else {
                     // Subsequent glyphs in ActualText span: suppress (empty string)
                     String::new()

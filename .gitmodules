@@ -1,0 +1,3 @@
+[submodule "lopdf"]
+	path = lopdf
+	url = git@github.com:TeamMilestone/lopdf.git

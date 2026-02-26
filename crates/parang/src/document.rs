@@ -22,6 +22,32 @@ pub struct PdfDocument {
     _mmap: Option<Mmap>,
 }
 
+/// Returns true for stream dictionaries whose content should be skipped
+/// during loading (not needed for text extraction).
+fn should_skip_stream(dict: &lopdf::Dictionary) -> bool {
+    let subtype = dict.get(b"Subtype").and_then(|v| v.as_name()).ok();
+    let obj_type = dict.get(b"Type").and_then(|v| v.as_name()).ok();
+
+    // Skip image XObjects (Subtype = Image)
+    if subtype == Some(b"Image".as_slice()) {
+        return true;
+    }
+    // Skip metadata streams (Type = Metadata)
+    if obj_type == Some(b"Metadata".as_slice()) {
+        return true;
+    }
+    // Skip CFF/OpenType font programs (FontFile3)
+    if matches!(subtype, Some(b"CIDFontType0C") | Some(b"Type1C") | Some(b"OpenType")) {
+        return true;
+    }
+    // Skip TrueType font programs (FontFile2): has /Length1 but no /Type or /Subtype
+    // Per PDF spec, /Length1 is only used for font descriptor stream objects.
+    if subtype.is_none() && obj_type.is_none() && dict.has(b"Length1") {
+        return true;
+    }
+    false
+}
+
 impl PdfDocument {
     /// Open a PDF file using memory-mapped I/O.
     pub fn open(path: &Path) -> Result<Self> {
@@ -29,13 +55,13 @@ impl PdfDocument {
         // SAFETY: The file is opened read-only and we keep the Mmap alive
         // for the lifetime of PdfDocument.
         let mmap = unsafe { Mmap::map(&file)? };
-        let doc = Document::load_mem(&mmap)?;
+        let doc = Document::load_mem_skip_streams(&mmap, should_skip_stream)?;
         Self::from_document(doc, Some(mmap))
     }
 
     /// Load a PDF from an in-memory byte slice.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let doc = Document::load_mem(data)?;
+        let doc = Document::load_mem_skip_streams(data, should_skip_stream)?;
         Self::from_document(doc, None)
     }
 

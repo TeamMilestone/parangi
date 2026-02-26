@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use lopdf::{Document, Object, ObjectId};
 
 /// Thread-safe font cache keyed by ObjectId.
-pub type FontCache = Arc<Mutex<HashMap<ObjectId, Arc<PdfFont>>>>;
+/// Uses RwLock for concurrent reads (font cache is read-heavy).
+pub type FontCache = Arc<std::sync::RwLock<HashMap<ObjectId, Arc<PdfFont>>>>;
 
 use super::graphics_state::GraphicsStateStack;
 use super::matrix::Matrix;
@@ -668,7 +669,7 @@ impl StreamEngine {
             // Check cache first (only for referenced fonts with valid ObjectId)
             if oid != (0, 0) {
                 if let Some(cache) = font_cache {
-                    if let Ok(cache_guard) = cache.lock() {
+                    if let Ok(cache_guard) = cache.read() {
                         if let Some(cached_font) = cache_guard.get(&oid) {
                             fonts.insert(name.clone(), Arc::clone(cached_font));
                             continue;
@@ -683,7 +684,7 @@ impl StreamEngine {
                     // Store in cache
                     if oid != (0, 0) {
                         if let Some(cache) = font_cache {
-                            if let Ok(mut cache_guard) = cache.lock() {
+                            if let Ok(mut cache_guard) = cache.write() {
                                 cache_guard.insert(oid, Arc::clone(&font));
                             }
                         }

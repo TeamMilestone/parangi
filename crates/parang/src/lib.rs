@@ -22,7 +22,7 @@ pub use text::{StripperConfig, assemble_text};
 use rayon::prelude::*;
 use stream::engine::FontCache;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 /// Extract all text from a PDF file using the full stream engine and text assembly.
 pub fn extract_text(path: &std::path::Path) -> Result<String> {
@@ -44,8 +44,14 @@ pub fn extract_text_with_config(
         return Ok(String::new());
     }
 
-    // Collect per-page data sequentially (lopdf page tree traversal is not thread-safe)
-    let page_data: Vec<_> = (0..page_count)
+    // Shared font cache across pages within the same document
+    let font_cache: FontCache = Arc::new(RwLock::new(HashMap::new()));
+    let doc_arc = doc.inner_arc();
+
+    // Process all pages in parallel (page data collection + text extraction in one pass).
+    // All Document operations are read-only via Arc<Document>, so this is thread-safe.
+    let page_texts: Vec<(u32, String)> = (0..page_count)
+        .into_par_iter()
         .filter_map(|page_num| {
             let page = doc.page(page_num).ok()?;
             let content_bytes = page.content_bytes().ok()?;
@@ -59,18 +65,7 @@ pub fn extract_text_with_config(
                 .map(|r| r.dictionary().clone());
             let rotation = page.rotation().unwrap_or(0) as i32;
             let media_box = page.media_box().ok()?;
-            Some((page_num, content_bytes, resources_dict, rotation, media_box))
-        })
-        .collect();
 
-    // Shared font cache across pages within the same document
-    let font_cache: FontCache = Arc::new(Mutex::new(HashMap::new()));
-
-    // Process pages in parallel
-    let doc_arc = doc.inner_arc();
-    let page_texts: Vec<(u32, String)> = page_data
-        .into_par_iter()
-        .filter_map(|(page_num, content_bytes, resources_dict, rotation, media_box)| {
             let mut engine = stream::engine::StreamEngine::with_font_cache(
                 doc_arc.clone(),
                 font_cache.clone(),
@@ -146,7 +141,7 @@ pub fn extract_text_sequential(
 ) -> Result<String> {
     let doc = PdfDocument::open(path)?;
     let mut output = String::new();
-    let font_cache: FontCache = Arc::new(Mutex::new(HashMap::new()));
+    let font_cache: FontCache = Arc::new(RwLock::new(HashMap::new()));
 
     for page_num in 0..doc.page_count() {
         let page = doc.page(page_num)?;

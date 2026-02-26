@@ -1,12 +1,12 @@
 //! Integration tests using real PDF files.
 
 use std::path::Path;
-use parang::PdfDocument;
-use parang::cos_helpers::DocumentExt;
-use parang::encoding::cmap_parser;
-use parang::font::PdfFont;
-use parang::stream::engine::StreamEngine;
-use parang::text::{assemble_text, StripperConfig};
+use parangi::PdfDocument;
+use parangi::cos_helpers::DocumentExt;
+use parangi::encoding::cmap_parser;
+use parangi::font::PdfFont;
+use parangi::stream::engine::StreamEngine;
+use parangi::text::{assemble_text, StripperConfig};
 
 const SAMPLE_KOREAN_PDF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

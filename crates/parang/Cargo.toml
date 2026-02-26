@@ -1,11 +1,14 @@
 [package]
-name = "parang"
+name = "parangi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "PDF text extraction library — Rust port of Apache PDFBox"
+repository = "https://github.com/TeamMilestone/parangi"
+keywords = ["pdf", "text-extraction", "pdfbox"]
+categories = ["text-processing"]
 
 [dependencies]
 lopdf = { workspace = true }

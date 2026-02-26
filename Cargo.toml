@@ -4,6 +4,7 @@ members = [
     "crates/parang",
     "crates/parang-cli",
 ]
+default-members = ["crates/parang-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,7 +14,7 @@ rust-version = "1.75"
 authors = ["Wonsup Lee <onesup.lee@gmail.com>"]
 
 [workspace.dependencies]
-lopdf = { package = "lopdf-parang", path = "lopdf" }
+lopdf = { package = "lopdf-parang", version = "0.39.1", path = "lopdf" }
 rayon = "1.10"
 memmap2 = "0.9"
 compact_str = "0.8"

@@ -1,18 +1,19 @@
 [package]
-name = "parang-cli"
+name = "parangi-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "CLI tool for PDF text extraction"
+repository = "https://github.com/TeamMilestone/parangi"
 
 [[bin]]
-name = "parang"
+name = "parangi"
 path = "src/main.rs"
 
 [dependencies]
-parang = { path = "../parang" }
+parangi = { path = "../parang" }
 clap = { workspace = true }
 rayon = { workspace = true }
 env_logger = { workspace = true }

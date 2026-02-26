@@ -72,7 +72,7 @@ fn main() {
             .ok();
     }
 
-    let config = parang::StripperConfig::default();
+    let config = parangi::StripperConfig::default();
 
     // Collect all input paths
     let mut all_inputs = cli.input.clone();
@@ -89,9 +89,9 @@ fn main() {
         // Single file mode: output to stdout or specified file
         let path = &all_inputs[0];
         let result = if cli.sequential {
-            parang::extract_text_sequential(path, &config)
+            parangi::extract_text_sequential(path, &config)
         } else {
-            parang::extract_text_with_config(path, &config)
+            parangi::extract_text_with_config(path, &config)
         };
         match result {
             Ok(text) => {
@@ -125,7 +125,7 @@ fn main() {
 
         // Streaming parallel: process and write immediately per file
         all_inputs.par_iter().for_each(|path| {
-            let result = parang::extract_text_with_config(path, &config);
+            let result = parangi::extract_text_with_config(path, &config);
             match result {
                 Ok(text) => {
                     success_count.fetch_add(1, Ordering::Relaxed);
@@ -165,12 +165,12 @@ fn main() {
             );
         }
 
-        parang::print_profile_summary();
+        parangi::print_profile_summary();
 
         if errors > 0 {
             std::process::exit(1);
         }
     }
 
-    parang::print_profile_summary();
+    parangi::print_profile_summary();
 }

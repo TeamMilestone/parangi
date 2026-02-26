@@ -23,7 +23,7 @@ echo "Profile data dir: $PGO_DIR"
 echo ""
 echo "Step 1/4: Building instrumented binary..."
 rm -rf "$PGO_DIR"
-RUSTFLAGS="-Cprofile-generate=$PGO_DIR" cargo build --release
+RUSTFLAGS="-Ctarget-cpu=native -Cprofile-generate=$PGO_DIR" cargo build --release
 
 # Step 2: Collect profiles
 echo ""
@@ -42,7 +42,7 @@ echo "  Merged: $(ls -lh "$PGO_MERGED" | awk '{print $5}')"
 # Step 4: Optimized build
 echo ""
 echo "Step 4/4: Building PGO-optimized binary..."
-RUSTFLAGS="-Cprofile-use=$PGO_MERGED" cargo build --release
+RUSTFLAGS="-Ctarget-cpu=native -Cprofile-use=$PGO_MERGED" cargo build --release
 
 echo ""
 echo "=== PGO build complete ==="

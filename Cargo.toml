@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/parang",
     "crates/parang-cli",
+    "crates/pdf-oxide-bench",
 ]
 
 [workspace.package]

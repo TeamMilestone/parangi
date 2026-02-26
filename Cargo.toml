@@ -13,7 +13,7 @@ rust-version = "1.75"
 authors = ["Wonsup Lee <onesup.lee@gmail.com>"]
 
 [workspace.dependencies]
-lopdf = { path = "lopdf" }
+lopdf = { package = "lopdf-parang", path = "lopdf" }
 rayon = "1.10"
 memmap2 = "0.9"
 compact_str = "0.8"

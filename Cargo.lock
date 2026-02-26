@@ -1035,8 +1035,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "lopdf"
-version = "0.39.0"
+name = "lopdf-parang"
+version = "0.39.1"
 dependencies = [
  "aes",
  "bitflags",
@@ -1252,7 +1252,7 @@ dependencies = [
  "env_logger",
  "hashbrown 0.15.5",
  "log",
- "lopdf",
+ "lopdf-parang",
  "memmap2",
  "rayon",
  "thiserror",

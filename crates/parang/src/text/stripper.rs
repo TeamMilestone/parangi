@@ -98,18 +98,8 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
     // Remove spaces that are contained within other characters
     remove_contained_spaces(positions);
 
-    // Merge combining diacritical marks with preceding characters
-    {
-        let mut unicode_values: Vec<String> =
-            positions.iter().map(|p| p.unicode.clone()).collect();
-        if normalizer::merge_diacritics(&mut unicode_values) {
-            // Apply merged values back and remove empty positions
-            for (i, val) in unicode_values.into_iter().enumerate() {
-                positions[i].unicode = val;
-            }
-            positions.retain(|p| !p.unicode.is_empty());
-        }
-    }
+    // Merge combining diacritical marks with preceding characters (in-place, skip if none)
+    normalizer::merge_diacritics_in_place(positions);
 
     let mut output = String::new();
     let mut line = Vec::<&TextPosition>::new();

@@ -75,6 +75,40 @@ pub fn merge_diacritics(unicode_values: &mut [String]) -> bool {
     merged
 }
 
+/// Merge combining diacritical marks directly on TextPositions.
+///
+/// Avoids cloning all unicode strings — only processes positions with
+/// combining marks, using std::mem::take for zero-copy transfers.
+/// Includes a quick early-return if no combining marks exist.
+pub fn merge_diacritics_in_place(positions: &mut Vec<super::TextPosition>) {
+    if positions.len() < 2 {
+        return;
+    }
+
+    // Quick check: any combining marks at all?
+    let has_combining = positions.iter().any(|p| {
+        !p.unicode.is_empty() && p.unicode.chars().all(|ch| is_combining_char(ch))
+    });
+    if !has_combining {
+        return;
+    }
+
+    let mut i = 1;
+    while i < positions.len() {
+        if !positions[i].unicode.is_empty()
+            && positions[i].unicode.chars().all(|ch| is_combining_char(ch))
+            && !positions[i - 1].unicode.is_empty()
+        {
+            let mark = std::mem::take(&mut positions[i].unicode);
+            positions[i - 1].unicode.push_str(&mark);
+            let normalized: String = positions[i - 1].unicode.nfc().collect();
+            positions[i - 1].unicode = normalized;
+        }
+        i += 1;
+    }
+    positions.retain(|p| !p.unicode.is_empty());
+}
+
 /// Check if a string consists entirely of combining diacritical marks.
 fn is_combining_mark(s: &str) -> bool {
     if s.is_empty() {

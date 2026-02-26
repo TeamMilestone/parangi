@@ -273,7 +273,8 @@ fn parse_literal_string(data: &[u8], mut pos: usize) -> (Vec<u8>, usize) {
 /// Parse a hex string after the opening `<`.
 fn parse_hex_string(data: &[u8], mut pos: usize) -> (Vec<u8>, usize) {
     let len = data.len();
-    let mut result = Vec::with_capacity(64);
+    // Korean CJK glyph codes are 2 bytes per code; start small to reduce heap waste.
+    let mut result = Vec::with_capacity(4);
     let mut high: Option<u8> = None;
 
     while pos < len {
@@ -309,7 +310,6 @@ fn parse_hex_string(data: &[u8], mut pos: usize) -> (Vec<u8>, usize) {
 fn parse_number(data: &[u8], mut pos: usize) -> (Object, usize) {
     let start = pos;
     let len = data.len();
-    let mut has_dot = false;
 
     // Optional sign
     let negative = if pos < len && data[pos] == b'-' {
@@ -332,7 +332,6 @@ fn parse_number(data: &[u8], mut pos: usize) -> (Object, usize) {
 
     // Decimal point + fractional digits
     if pos < len && data[pos] == b'.' {
-        has_dot = true;
         pos += 1;
         let frac_start = pos;
         let mut frac_val: u64 = 0;

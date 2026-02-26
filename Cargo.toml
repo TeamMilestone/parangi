@@ -28,6 +28,6 @@ clap = { version = "4", features = ["derive"] }
 mimalloc = "0.1"
 
 [profile.release]
-lto = "thin"
+lto = true
 codegen-units = 1
 opt-level = 3

@@ -165,8 +165,12 @@ fn main() {
             );
         }
 
+        parang::print_profile_summary();
+
         if errors > 0 {
             std::process::exit(1);
         }
     }
+
+    parang::print_profile_summary();
 }

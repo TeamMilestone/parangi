@@ -4,14 +4,16 @@
 //! Processes PDF content stream operators to update graphics/text state
 //! and extract text positioning information.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use lopdf::{Document, Object, ObjectId};
 
+/// Fast HashMap using ahash (faster than SipHash for Vec<u8>/tuple keys).
+type HashMap<K, V> = hashbrown::HashMap<K, V>;
+
 /// Thread-safe font cache keyed by ObjectId.
 /// Uses RwLock for concurrent reads (font cache is read-heavy).
-pub type FontCache = Arc<std::sync::RwLock<HashMap<ObjectId, Arc<PdfFont>>>>;
+pub type FontCache = Arc<std::sync::RwLock<hashbrown::HashMap<ObjectId, Arc<PdfFont>>>>;
 
 use super::graphics_state::GraphicsStateStack;
 use super::matrix::Matrix;
@@ -55,8 +57,6 @@ pub struct StreamEngine {
     /// Collected text positions from this content stream.
     text_positions: Vec<TextPosition>,
 
-    /// Page rotation (0, 90, 180, 270).
-    page_rotation: i32,
     /// Page width (from CropBox or MediaBox).
     page_width: f32,
     /// Page height.
@@ -85,7 +85,6 @@ impl StreamEngine {
             fonts: HashMap::new(),
             xobject_refs: HashMap::new(),
             text_positions: Vec::new(),
-            page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
             nesting_level: 0,
@@ -104,7 +103,6 @@ impl StreamEngine {
             fonts: HashMap::new(),
             xobject_refs: HashMap::new(),
             text_positions: Vec::new(),
-            page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
             nesting_level: 0,
@@ -116,8 +114,7 @@ impl StreamEngine {
     }
 
     /// Set page geometry for TextPosition creation.
-    pub fn set_page_info(&mut self, rotation: i32, width: f32, height: f32) {
-        self.page_rotation = rotation;
+    pub fn set_page_info(&mut self, _rotation: i32, width: f32, height: f32) {
         self.page_width = width;
         self.page_height = height;
     }
@@ -362,10 +359,20 @@ impl StreamEngine {
     }
 
     /// T*: Move to start of next line (= Td 0 -leading).
+    /// Inlined to avoid Vec<Object> heap allocation per newline.
     fn op_t_star(&mut self) -> Result<()> {
         let leading = self.state_stack.current().text_state.leading;
-        let operands = vec![Object::Real(0.0), Object::Real(-leading)];
-        self.op_td(&operands)
+        let ty = -leading;
+        let gs = self.state_stack.current_mut();
+        if let Some(ref mut tlm) = gs.text_line_matrix {
+            // Td 0 ty: translate(0, ty) → new_tx = tlm_tx + ty*c, new_ty = tlm_ty + ty*d
+            let new_tx = tlm.translate_x() + ty * tlm.shear_x();
+            let new_ty = tlm.translate_y() + ty * tlm.scale_y();
+            tlm.set(2, 0, new_tx);
+            tlm.set(2, 1, new_ty);
+            gs.text_matrix = Some(tlm.clone());
+        }
+        Ok(())
     }
 
     // === Text showing operators ===
@@ -899,8 +906,9 @@ impl StreamEngine {
         let trm_scale_y = trm_template.scaling_factor_y().abs();
         let dy_display = trm_scale_y;
         let space_width_display = (cached_space_width * trm_scale_x).abs();
-        let font_size_in_pt = (font_size * tm.scaling_factor_x()) as i32;
-
+        // TRM a,b components — constant across loop, needed for TextPosition.
+        let trm_const_a = trm_template.scale_x();
+        let trm_const_b = trm_template.shear_y();
         // Constant Tm rotation/scale + rise contributions.
         // TRM row2 = (params×Tm) row2 × CTM, where:
         //   (params×Tm) row2 = [rise*tm[3]+tm_tx, rise*tm[4]+tm_ty, 1]
@@ -944,11 +952,6 @@ impl StreamEngine {
             let trm_tx = row2_0 * ctm_a + row2_1 * ctm_c + ctm_tx;
             let trm_ty = row2_0 * ctm_b + row2_1 * ctm_d + ctm_ty;
 
-            // Build TRM (constant a,b,c,d from template + derived tx,ty)
-            let mut trm = trm_template;
-            trm.set(2, 0, trm_tx);
-            trm.set(2, 1, trm_ty);
-
             // --- Get glyph width (text space, 1/1000 units) ---
             let width_1000 = if let Some(ref f) = font {
                 f.get_width(code)
@@ -962,7 +965,6 @@ impl StreamEngine {
             let tdtm_tx = tx_visual * tm_a + tm_tx;
             let tdtm_ty = tx_visual * tm_b + tm_ty;
             let end_x = tdtm_tx * ctm_a + tdtm_ty * ctm_c + ctm_tx;
-            let end_y = tdtm_tx * ctm_b + tdtm_ty * ctm_d + ctm_ty;
             let dx_display = end_x - trm_tx;
 
             // --- Unicode mapping ---
@@ -995,16 +997,14 @@ impl StreamEngine {
             if !final_unicode.is_empty() {
                 let tp = TextPosition {
                     unicode: final_unicode,
-                    char_code: code,
-                    text_matrix: trm,
-                    end_x,
-                    end_y,
+                    trm_a: trm_const_a,
+                    trm_b: trm_const_b,
+                    trm_tx,
+                    trm_ty,
                     max_height: dy_display,
                     individual_width: dx_display,
                     space_width: space_width_display,
                     font_size,
-                    font_size_in_pt,
-                    page_rotation: self.page_rotation,
                     page_width: self.page_width,
                     page_height: self.page_height,
                 };
@@ -1019,15 +1019,17 @@ impl StreamEngine {
             };
             let total_tx = (displacement_x * font_size + char_spacing + word_space) * hs;
 
-            // Update state's Tm (needed for subsequent operators / next show_text call)
-            let gs = self.state_stack.current_mut();
-            if let Some(ref mut state_tm) = gs.text_matrix {
-                state_tm.translate(total_tx, 0.0);
-            }
-
-            // Advance local Tm translation (same arithmetic as Matrix::translate)
+            // Track Tm translation locally only; write back to state once after loop.
+            // This avoids per-glyph current_mut() + Option match + Matrix::translate().
             tm_tx += total_tx * tm_a;
             tm_ty += total_tx * tm_b;
+        }
+
+        // Write back accumulated Tm translation to state (needed for subsequent operators).
+        let gs = self.state_stack.current_mut();
+        if let Some(ref mut state_tm) = gs.text_matrix {
+            state_tm.set(2, 0, tm_tx);
+            state_tm.set(2, 1, tm_ty);
         }
 
         Ok(())
@@ -1040,7 +1042,6 @@ impl StreamEngine {
         let font_size = gs.text_state.font_size;
         let hs = gs.text_state.horizontal_scaling_fraction();
 
-        // TJ adjustment: tx = -(adjustment / 1000) * fontSize * Hs
         let tx = -(adjustment / 1000.0) * font_size * hs;
 
         let gs = self.state_stack.current_mut();
@@ -1050,6 +1051,7 @@ impl StreamEngine {
     }
 
 }
+
 
 #[cfg(test)]
 mod tests {

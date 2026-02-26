@@ -41,6 +41,9 @@ pub trait DocumentExt {
 
     /// Get a stream object and decompress its content.
     fn get_stream_data(&self, obj: &Object) -> Result<Vec<u8>>;
+
+    /// Get raw bytes of a lazy-loaded stream from the backing buffer.
+    fn get_stream_backing_bytes<'a>(&'a self, stream: &lopdf::Stream) -> Option<&'a [u8]>;
 }
 
 impl DocumentExt for Document {
@@ -128,8 +131,16 @@ impl DocumentExt for Document {
         };
         match obj {
             Object::Stream(stream) => {
-                // Try decompressed_content first, fall back to raw content.
-                // lopdf sometimes fails on streams without a Filter entry.
+                // If content is empty (lazy-loaded stream), try the backing buffer first.
+                if stream.content.is_empty() {
+                    if let Some(raw) = self.get_stream_backing_bytes(stream) {
+                        return match stream.decompressed_content_from(raw) {
+                            Ok(data) => Ok(data),
+                            Err(_) => Ok(raw.to_vec()),
+                        };
+                    }
+                }
+                // Fall back to stored content (or empty if no backing buffer).
                 match stream.decompressed_content() {
                     Ok(data) => Ok(data),
                     Err(_) => Ok(stream.content.clone()),
@@ -140,6 +151,10 @@ impl DocumentExt for Document {
                 obj.type_name()
             ))),
         }
+    }
+
+    fn get_stream_backing_bytes<'a>(&'a self, stream: &lopdf::Stream) -> Option<&'a [u8]> {
+        Document::get_stream_backing_bytes(self, stream)
     }
 }
 

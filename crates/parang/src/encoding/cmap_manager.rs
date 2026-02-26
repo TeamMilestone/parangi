@@ -2,7 +2,7 @@
 //!
 //! Ported from org.apache.pdfbox.pdmodel.font.CMapManager.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use super::cmap::CMap;

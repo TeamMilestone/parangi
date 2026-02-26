@@ -21,7 +21,7 @@ pub use text::{StripperConfig, assemble_text};
 
 use rayon::prelude::*;
 use stream::engine::FontCache;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -62,6 +62,8 @@ pub fn print_profile_summary() {
     eprintln!("  process_content (eng):   {:>10.1}ms  ({:>5.1}%)", ms(process), pct(process));
     eprintln!("  assemble_text (strip):   {:>10.1}ms  ({:>5.1}%)", ms(assemble), pct(assemble));
     eprintln!("  TOTAL (sum of phases):   {:>10.1}ms", ms(total));
+    // Also print lopdf sub-phase breakdown
+    lopdf::print_lopdf_profile();
 }
 
 pub fn extract_text_with_config(
@@ -96,11 +98,8 @@ pub fn extract_text_with_config(
             if content_bytes.is_empty() {
                 return None;
             }
-            let resources_dict = page
-                .resources()
-                .ok()
-                .flatten()
-                .map(|r| r.dictionary().clone());
+            // Borrow resources from page without cloning the Dictionary.
+            let resources = page.resources().ok().flatten();
             let rotation = page.rotation().unwrap_or(0) as i32;
             let media_box = page.media_box().ok()?;
             if profiling {
@@ -114,8 +113,8 @@ pub fn extract_text_with_config(
                 font_cache.clone(),
             );
             engine.set_page_info(rotation, media_box[2], media_box[3]);
-            if let Some(ref res_dict) = resources_dict {
-                engine.load_resources(res_dict);
+            if let Some(ref res) = resources {
+                engine.load_resources(res.dictionary());
             }
             if profiling {
                 PROF_LOAD_RESOURCES.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);

@@ -14,7 +14,7 @@ use super::TextPosition;
 /// Uses direction-adjusted coordinates (origin at upper-left).
 /// Strict total order: direction → Y (top to bottom) → X (left to right).
 pub fn sort_positions(positions: &mut [TextPosition]) {
-    positions.sort_by(|a, b| compare_positions(a, b));
+    positions.sort_unstable_by(|a, b| compare_positions(a, b));
 }
 
 /// Compare two TextPositions for reading order.
@@ -30,22 +30,18 @@ fn compare_positions(a: &TextPosition, b: &TextPosition) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::matrix::Matrix;
 
     fn make_tp(unicode: &str, x: f32, y: f32, width: f32, height: f32) -> TextPosition {
-        let trm = Matrix::from_values(height, 0.0, 0.0, height, x, y);
         TextPosition {
             unicode: unicode.into(),
-            char_code: 0,
-            text_matrix: trm,
-            end_x: x + width,
-            end_y: y,
+            trm_a: height,
+            trm_b: 0.0,
+            trm_tx: x,
+            trm_ty: y,
             max_height: height,
             individual_width: width,
             space_width: 3.0,
             font_size: 12.0,
-            font_size_in_pt: 12,
-            page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
         }

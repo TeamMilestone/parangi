@@ -2,7 +2,8 @@
 //!
 //! Ported from org.apache.fontbox.cmap.CMap.
 
-use std::collections::HashMap;
+use compact_str::CompactString;
+use hashbrown::HashMap;
 
 /// A CMap defines mappings from character codes to Unicode strings and/or CIDs.
 ///
@@ -19,12 +20,15 @@ pub struct CMap {
     codespace_ranges: Vec<CodespaceRange>,
 
     /// Code → Unicode mappings, keyed by byte length (1-4).
-    char_to_unicode: [HashMap<u32, String>; 4],
+    /// Uses CompactString for inline storage of short strings (Korean chars = 3 bytes UTF-8,
+    /// well within the 23-byte inline capacity), avoiding heap pointer follow per lookup.
+    char_to_unicode: [HashMap<u32, CompactString>; 4],
 
     /// Code → CID direct mappings, keyed by byte length (1-4).
     code_to_cid: [HashMap<u32, u32>; 4],
-    /// Code → CID range mappings.
-    cid_ranges: Vec<CidRange>,
+    /// Code → CID range mappings, separated by code byte length (index = length - 1).
+    /// Each sub-Vec is sorted by `from` for binary search after `finalize_cid_ranges()`.
+    cid_ranges: [Vec<CidRange>; 4],
 
     /// Reverse mapping: Unicode string → code bytes.
     unicode_to_code: HashMap<String, Vec<u8>>,
@@ -52,7 +56,7 @@ impl CMap {
                 HashMap::new(),
                 HashMap::new(),
             ],
-            cid_ranges: Vec::new(),
+            cid_ranges: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             unicode_to_code: HashMap::new(),
             min_code_length: 4,
             max_code_length: 0,
@@ -88,13 +92,26 @@ impl CMap {
         if let Some(&cid) = self.code_to_cid[length - 1].get(&code) {
             return Some(cid);
         }
-        // Range lookup
-        for range in &self.cid_ranges {
-            if range.code_length == length && code >= range.from && code <= range.to {
+        // Binary search in sorted ranges for this code length.
+        // Ranges are sorted by `from` after finalize_cid_ranges() is called.
+        let ranges = &self.cid_ranges[length - 1];
+        // partition_point returns index of first range with from > code
+        let idx = ranges.partition_point(|r| r.from <= code);
+        if idx > 0 {
+            let range = &ranges[idx - 1];
+            if code <= range.to {
                 return Some(range.cid_start + (code - range.from));
             }
         }
         None
+    }
+
+    /// Sort cid_ranges by `from` for binary search in `to_cid`.
+    /// Must be called after all `add_cid_range` calls (e.g., at end of CMap parsing).
+    pub fn finalize_cid_ranges(&mut self) {
+        for ranges in &mut self.cid_ranges {
+            ranges.sort_unstable_by_key(|r| r.from);
+        }
     }
 
     /// Get code bytes for a Unicode string (reverse lookup).
@@ -119,12 +136,14 @@ impl CMap {
         if length == 0 || length > 4 {
             return;
         }
-        // Reverse mapping
+        // Reverse mapping (unicode_to_code is not on the hot path, keep as String)
         let code_bytes = &code.to_be_bytes()[4 - length..];
         self.unicode_to_code
             .entry(unicode.clone())
             .or_insert_with(|| code_bytes.to_vec());
-        self.char_to_unicode[length - 1].insert(code, unicode);
+        // Store as CompactString: Korean chars (3 bytes UTF-8) are stored inline,
+        // eliminating heap pointer follow during per-glyph lookups.
+        self.char_to_unicode[length - 1].insert(code, CompactString::from(unicode.as_str()));
     }
 
     /// Add a character code → CID direct mapping.
@@ -136,8 +155,10 @@ impl CMap {
     }
 
     /// Add a CID range mapping.
+    /// Call `finalize_cid_ranges()` after all ranges are added to enable binary search.
     pub fn add_cid_range(&mut self, range: CidRange) {
-        self.cid_ranges.push(range);
+        let idx = range.code_length.saturating_sub(1).min(3);
+        self.cid_ranges[idx].push(range);
     }
 
     /// Get codespace ranges.
@@ -167,12 +188,15 @@ impl CMap {
         self.char_to_unicode.iter().map(|m| m.len()).sum()
     }
 
-    /// Total number of CID mappings (direct).
+    /// Total number of CID mappings (direct + ranges).
     pub fn cid_mapping_count(&self) -> usize {
-        self.code_to_cid.iter().map(|m| m.len()).sum()
+        let direct: usize = self.code_to_cid.iter().map(|m| m.len()).sum();
+        let ranges: usize = self.cid_ranges.iter().map(|v| v.len()).sum();
+        direct + ranges
     }
 
     /// Merge another CMap's mappings into this one.
+    /// Call `finalize_cid_ranges()` after merging to restore binary search order.
     pub fn merge(&mut self, other: &CMap) {
         for range in &other.codespace_ranges {
             self.add_codespace_range(range.clone());
@@ -189,8 +213,10 @@ impl CMap {
                 self.code_to_cid[i].entry(code).or_insert(cid);
             }
         }
-        for range in &other.cid_ranges {
-            self.cid_ranges.push(range.clone());
+        for (i, ranges) in other.cid_ranges.iter().enumerate() {
+            for range in ranges {
+                self.cid_ranges[i].push(range.clone());
+            }
         }
         for (unicode, code_bytes) in &other.unicode_to_code {
             self.unicode_to_code

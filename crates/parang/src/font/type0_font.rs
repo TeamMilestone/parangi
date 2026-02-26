@@ -14,6 +14,9 @@ use crate::encoding::cmap_manager;
 use crate::encoding::cmap_parser;
 use crate::Result;
 
+/// Fast HashMap type: uses ahash instead of SipHash for O(1) lookups on u32 keys.
+type FastHashMap<K, V> = hashbrown::HashMap<K, V>;
+
 /// A width range entry: cid_start..=cid_end all have the same width.
 #[derive(Clone)]
 struct WidthRange {
@@ -27,7 +30,8 @@ struct WidthRange {
 #[derive(Clone)]
 struct CidWidths {
     /// Individual CID → width mappings (for small ranges / W arrays).
-    individual: std::collections::HashMap<u32, f32>,
+    /// Uses ahash (hashbrown) for faster lookups on u32 keys than SipHash.
+    individual: FastHashMap<u32, f32>,
     /// Range-based widths (for large cid_start..cid_end ranges).
     /// Sorted by start CID for binary search.
     ranges: Vec<WidthRange>,
@@ -36,7 +40,7 @@ struct CidWidths {
 impl CidWidths {
     fn new() -> Self {
         Self {
-            individual: std::collections::HashMap::new(),
+            individual: FastHashMap::new(),
             ranges: Vec::new(),
         }
     }
@@ -90,6 +94,9 @@ pub struct Type0Font {
     encoding_cmap: CMap,
     /// Whether the encoding CMap is a predefined one.
     is_cmap_predefined: bool,
+    /// Whether the encoding CMap is Identity-H or Identity-V (code == CID).
+    /// Used to short-circuit `code_to_cid` without table lookup.
+    is_identity_encoding: bool,
     /// ToUnicode CMap: character code → Unicode (highest priority).
     to_unicode_cmap: Option<CMap>,
     /// UCS2 CMap: CID → Unicode (for CJK fonts).
@@ -118,6 +125,9 @@ impl Type0Font {
         let (encoding_cmap, is_cmap_predefined) =
             Self::read_encoding_cmap(doc, font_dict);
 
+        // Detect Identity-H/V encoding: code == CID, no table lookup needed.
+        let is_identity_encoding = encoding_cmap.name.starts_with("Identity");
+
         // Read ToUnicode CMap
         let to_unicode_cmap = Self::read_to_unicode(doc, font_dict);
 
@@ -143,6 +153,7 @@ impl Type0Font {
             base_font,
             encoding_cmap,
             is_cmap_predefined,
+            is_identity_encoding,
             to_unicode_cmap,
             ucs2_cmap,
             is_descendant_cjk,
@@ -153,22 +164,33 @@ impl Type0Font {
 
     /// Decode a character code to Unicode.
     ///
-    /// Fallback chain:
-    /// 1. ToUnicode CMap (code → Unicode)
-    /// 2. Encoding CMap + UCS2 CMap (code → CID → Unicode) for CJK
-    /// 3. Identity mapping fallback
+    /// Hot path: 2-byte ToUnicode CMap lookup (covers 99%+ of Korean PDF glyphs).
+    /// Rare cases (1/3/4-byte codes, UCS2 fallback, identity fallback) are handled
+    /// by `to_unicode_slow` which is kept out of the ICache-sensitive hot loop.
+    #[inline]
     pub fn to_unicode(&self, code: u32) -> Option<compact_str::CompactString> {
-        // Tier 1: ToUnicode CMap
+        // Hot path: 2-byte ToUnicode CMap lookup (most common for CJK)
         if let Some(ref cmap) = self.to_unicode_cmap {
-            // Try 2-byte first (most common for CJK)
             if let Some(unicode) = cmap.to_unicode(code, 2) {
                 return Some(unicode.into());
             }
-            // Try 1-byte
+        }
+        // Cold path: 1/3/4-byte lookups, UCS2, identity fallbacks
+        self.to_unicode_slow(code)
+    }
+
+    /// Cold path for to_unicode: handles rare cases.
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]` to keep this code out of the
+    /// show_text() hot loop's ICache footprint.
+    #[cold]
+    #[inline(never)]
+    fn to_unicode_slow(&self, code: u32) -> Option<compact_str::CompactString> {
+        // Tier 1: ToUnicode CMap (1/3/4-byte codes)
+        if let Some(ref cmap) = self.to_unicode_cmap {
             if let Some(unicode) = cmap.to_unicode(code, 1) {
                 return Some(unicode.into());
             }
-            // Try 3 and 4 byte
             if let Some(unicode) = cmap.to_unicode(code, 3) {
                 return Some(unicode.into());
             }
@@ -181,7 +203,6 @@ impl Type0Font {
         if self.is_cmap_predefined || self.is_descendant_cjk {
             if let Some(ref ucs2) = self.ucs2_cmap {
                 let cid = self.code_to_cid(code);
-                // UCS2 CMap maps CID → Unicode using 2-byte codes
                 if let Some(unicode) = ucs2.to_unicode(cid, 2) {
                     return Some(unicode.into());
                 }
@@ -206,14 +227,19 @@ impl Type0Font {
     }
 
     /// Convert character code to CID using the encoding CMap.
+    #[inline]
     pub fn code_to_cid(&self, code: u32) -> u32 {
-        // Try different code lengths
+        // Identity-H/V: character code == CID, no table lookup needed.
+        if self.is_identity_encoding {
+            return code;
+        }
+        // Binary search in sorted cid_ranges (O(log N)) then HashMap fallback.
         for len in [2, 1, 3, 4] {
             if let Some(cid) = self.encoding_cmap.to_cid(code, len) {
                 return cid;
             }
         }
-        // Identity fallback: code = CID
+        // Last resort: code = CID
         code
     }
 
@@ -223,17 +249,41 @@ impl Type0Font {
         self.widths.get(cid).unwrap_or(self.default_width)
     }
 
-    /// Read a character code from the byte stream using the encoding CMap's
-    /// codespace ranges. Returns (code, bytes_consumed).
+    /// Read a character code from the byte stream.
+    ///
+    /// Hot path: Identity-H/V encoding reads exactly 2 bytes (99%+ of Korean PDFs).
+    /// Non-identity fonts with codespace matching are handled by `read_code_slow`.
+    #[inline]
     pub fn read_code(&self, data: &[u8], offset: usize) -> (u32, usize) {
+        let remaining = data.len() - offset;
+        // Hot path: Identity-H/V encoding — code is always 2 bytes, no codespace lookup needed.
+        if self.is_identity_encoding {
+            if remaining >= 2 {
+                let code = ((data[offset] as u32) << 8) | (data[offset + 1] as u32);
+                return (code, 2);
+            } else if remaining == 1 {
+                return (data[offset] as u32, 1);
+            } else {
+                return (0, 0);
+            }
+        }
+        // Cold path: codespace range matching for non-identity fonts
+        self.read_code_slow(data, offset)
+    }
+
+    /// Cold path for read_code: codespace range matching for non-identity fonts.
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]` to keep this code out of the
+    /// show_text() hot loop's ICache footprint.
+    #[cold]
+    #[inline(never)]
+    fn read_code_slow(&self, data: &[u8], offset: usize) -> (u32, usize) {
         let remaining = data.len() - offset;
         if remaining == 0 {
             return (0, 0);
         }
-
         let min_len = self.encoding_cmap.min_code_length().max(1);
         let max_len = self.encoding_cmap.max_code_length().min(remaining);
-
         for len in min_len..=max_len {
             let bytes = &data[offset..offset + len];
             if self.encoding_cmap.matches_codespace(bytes) {
@@ -244,8 +294,6 @@ impl Type0Font {
                 return (code, len);
             }
         }
-
-        // Fallback: single byte
         (data[offset] as u32, 1)
     }
 
@@ -566,6 +614,7 @@ mod tests {
             base_font: "TestFont".to_string(),
             encoding_cmap: CMap::new(),
             is_cmap_predefined: false,
+            is_identity_encoding: false,
             to_unicode_cmap: None,
             ucs2_cmap: None,
             is_descendant_cjk: false,
@@ -585,6 +634,7 @@ mod tests {
             base_font: "TestFont".to_string(),
             encoding_cmap: CMap::new(),
             is_cmap_predefined: false,
+            is_identity_encoding: false,
             to_unicode_cmap: Some(tounicode),
             ucs2_cmap: None,
             is_descendant_cjk: false,
@@ -606,6 +656,7 @@ mod tests {
             base_font: "TestFont".to_string(),
             encoding_cmap: CMap::new(),
             is_cmap_predefined: false,
+            is_identity_encoding: false,
             to_unicode_cmap: None,
             ucs2_cmap: None,
             is_descendant_cjk: false,

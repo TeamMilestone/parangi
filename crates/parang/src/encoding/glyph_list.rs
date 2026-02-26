@@ -2,7 +2,7 @@
 //!
 //! Ported from org.apache.pdfbox.pdmodel.font.encoding.GlyphList.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::LazyLock;
 
 /// The default Adobe Glyph List (AGL) + additional PDFBox entries.

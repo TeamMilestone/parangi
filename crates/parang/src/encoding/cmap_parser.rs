@@ -9,6 +9,8 @@ pub fn parse_cmap(data: &[u8]) -> CMap {
     let mut cmap = CMap::new();
     let mut parser = Parser::new(data);
     parser.parse(&mut cmap);
+    // Sort CID ranges by `from` within each code-length bucket to enable binary search.
+    cmap.finalize_cid_ranges();
     cmap
 }
 

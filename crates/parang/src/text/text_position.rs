@@ -4,27 +4,28 @@
 
 use compact_str::CompactString;
 
-use crate::stream::matrix::Matrix;
-
 /// A single character or glyph extracted from a PDF page,
 /// along with its position, size, and rendering information.
+///
+/// Layout: 64 bytes = exactly 1 cache line.
+/// CompactString(24) + 10×f32(40) = 64 bytes.
 #[derive(Debug, Clone)]
 pub struct TextPosition {
     /// Unicode text for this glyph (may be multi-char for ligatures).
     /// Uses CompactString for inline storage of short strings (most glyphs
     /// are 1-4 bytes), avoiding heap allocation.
     pub unicode: CompactString,
-    /// PDF character code (internal, not Unicode).
-    pub char_code: u32,
 
-    /// Text rendering matrix at the glyph's starting position.
-    /// TRM = [fontSize*Hs 0 0; 0 fontSize 0; 0 rise 1] x Tm x CTM
-    pub text_matrix: Matrix,
-
-    /// Ending X position after glyph advance (device space).
-    pub end_x: f32,
-    /// Ending Y position after glyph advance (device space).
-    pub end_y: f32,
+    // TRM (Text Rendering Matrix) components — only the 4 values actually used.
+    // TRM = [fontSize*Hs 0 0; 0 fontSize 0; 0 rise 1] × Tm × CTM
+    /// TRM scale_x (a): used for direction().
+    pub trm_a: f32,
+    /// TRM shear_y (b): used for direction().
+    pub trm_b: f32,
+    /// TRM translate_x (tx): glyph X position in device space.
+    pub trm_tx: f32,
+    /// TRM translate_y (ty): glyph Y position in device space.
+    pub trm_ty: f32,
 
     /// Font height in device space (absolute value).
     pub max_height: f32,
@@ -35,11 +36,7 @@ pub struct TextPosition {
 
     /// Font size from the Tf operator.
     pub font_size: f32,
-    /// Approximate font size in points (fontSize * textMatrix X scale).
-    pub font_size_in_pt: i32,
 
-    /// Page rotation (0, 90, 180, 270).
-    pub page_rotation: i32,
     /// Page width (from CropBox or MediaBox).
     pub page_width: f32,
     /// Page height.
@@ -50,33 +47,21 @@ impl TextPosition {
     /// Starting X coordinate in device space.
     #[inline]
     pub fn x(&self) -> f32 {
-        self.text_matrix.translate_x()
+        self.trm_tx
     }
 
     /// Starting Y coordinate in device space.
     #[inline]
     pub fn y(&self) -> f32 {
-        self.text_matrix.translate_y()
-    }
-
-    /// X scaling factor of the text rendering matrix.
-    #[inline]
-    pub fn x_scale(&self) -> f32 {
-        self.text_matrix.scaling_factor_x()
-    }
-
-    /// Y scaling factor of the text rendering matrix.
-    #[inline]
-    pub fn y_scale(&self) -> f32 {
-        self.text_matrix.scaling_factor_y()
+        self.trm_ty
     }
 
     /// Text direction in degrees (0, 90, 180, 270).
     ///
     /// Determined by examining the text rendering matrix components.
     pub fn direction(&self) -> f32 {
-        let a = self.text_matrix.scale_x();
-        let b = self.text_matrix.shear_y();
+        let a = self.trm_a;
+        let b = self.trm_b;
 
         if a.abs() > b.abs() {
             if a > 0.0 {
@@ -141,19 +126,17 @@ impl TextPosition {
 mod tests {
     use super::*;
 
-    fn make_tp(unicode: &str, trm: Matrix, end_x: f32, end_y: f32) -> TextPosition {
+    fn make_tp(unicode: &str, a: f32, b: f32, tx: f32, ty: f32, end_x: f32) -> TextPosition {
         TextPosition {
             unicode: unicode.into(),
-            char_code: 0,
-            text_matrix: trm,
-            end_x,
-            end_y,
+            trm_a: a,
+            trm_b: b,
+            trm_tx: tx,
+            trm_ty: ty,
             max_height: 10.0,
-            individual_width: end_x - trm.translate_x(),
+            individual_width: end_x - tx,
             space_width: 3.0,
             font_size: 12.0,
-            font_size_in_pt: 12,
-            page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
         }
@@ -161,8 +144,7 @@ mod tests {
 
     #[test]
     fn test_position_accessors() {
-        let trm = Matrix::from_values(12.0, 0.0, 0.0, 12.0, 100.0, 700.0);
-        let tp = make_tp("A", trm, 107.0, 700.0);
+        let tp = make_tp("A", 12.0, 0.0, 100.0, 700.0, 107.0);
 
         assert!((tp.x() - 100.0).abs() < 0.001);
         assert!((tp.y() - 700.0).abs() < 0.001);
@@ -172,25 +154,14 @@ mod tests {
     #[test]
     fn test_direction_horizontal() {
         // Normal left-to-right text: a>0, b=0
-        let trm = Matrix::from_values(12.0, 0.0, 0.0, 12.0, 100.0, 700.0);
-        let tp = make_tp("A", trm, 107.0, 700.0);
+        let tp = make_tp("A", 12.0, 0.0, 100.0, 700.0, 107.0);
         assert_eq!(tp.direction(), 0.0);
     }
 
     #[test]
     fn test_direction_rotated() {
         // 90-degree rotation: a=0, b>0
-        let trm = Matrix::from_values(0.0, 12.0, -12.0, 0.0, 100.0, 700.0);
-        let tp = make_tp("A", trm, 100.0, 712.0);
+        let tp = make_tp("A", 0.0, 12.0, 100.0, 700.0, 100.0);
         assert_eq!(tp.direction(), 90.0);
-    }
-
-    #[test]
-    fn test_scaling_factors() {
-        let trm = Matrix::from_values(12.0, 0.0, 0.0, 12.0, 100.0, 700.0);
-        let tp = make_tp("A", trm, 107.0, 700.0);
-
-        assert!((tp.x_scale() - 12.0).abs() < 0.001);
-        assert!((tp.y_scale() - 12.0).abs() < 0.001);
     }
 }

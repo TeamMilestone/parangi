@@ -6,16 +6,31 @@
 //! - Combining diacritical mark merging with preceding characters
 //! - Ligature decomposition (fi → fi, fl → fl, etc.)
 
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{IsNormalized, UnicodeNormalization};
 
 /// Normalize a string of extracted text.
 ///
 /// Applies:
 /// 1. Ligature decomposition (optional, common PDF ligatures)
 /// 2. Unicode NFC normalization
-pub fn normalize_text(text: &str) -> String {
-    let decomposed = decompose_ligatures(text);
-    decomposed.nfc().collect()
+///
+/// Fast path: Korean text (no ligatures, already NFC) is returned unchanged
+/// with zero allocation.
+pub fn normalize_text(text: String) -> String {
+    // Fast path: check for ligatures in the U+FB00..=U+FB06 range.
+    // Korean PDFs never contain these, so this scan exits without finding any.
+    let has_ligatures = text.chars().any(|c| matches!(c, '\u{FB00}'..='\u{FB06}'));
+    if !has_ligatures {
+        // NFC quick-check: Hangul syllables are always NFC, so this returns
+        // IsNormalized::Yes immediately for Korean text — zero allocation.
+        if unicode_normalization::is_nfc_quick(text.chars()) == IsNormalized::Yes {
+            return text;
+        }
+        // Not confirmed NFC (Maybe or No) but no ligatures — just NFC-normalize.
+        return text.nfc().collect();
+    }
+    // Has ligatures: decompose then NFC-normalize.
+    decompose_ligatures(&text).nfc().collect()
 }
 
 /// Decompose common ligatures into their constituent characters.
@@ -138,28 +153,28 @@ mod tests {
 
     #[test]
     fn test_normalize_basic() {
-        assert_eq!(normalize_text("Hello"), "Hello");
-        assert_eq!(normalize_text(""), "");
+        assert_eq!(normalize_text("Hello".to_string()), "Hello");
+        assert_eq!(normalize_text(String::new()), "");
     }
 
     #[test]
     fn test_ligature_decomposition() {
         // fi ligature → "fi"
-        assert_eq!(normalize_text("\u{FB01}nd"), "find");
+        assert_eq!(normalize_text("\u{FB01}nd".to_string()), "find");
         // fl ligature → "fl"
-        assert_eq!(normalize_text("\u{FB02}ow"), "flow");
+        assert_eq!(normalize_text("\u{FB02}ow".to_string()), "flow");
         // ff ligature → "ff"
-        assert_eq!(normalize_text("\u{FB00}ice"), "ffice");
+        assert_eq!(normalize_text("\u{FB00}ice".to_string()), "ffice");
         // ffi ligature → "ffi"
-        assert_eq!(normalize_text("o\u{FB03}ce"), "office");
+        assert_eq!(normalize_text("o\u{FB03}ce".to_string()), "office");
         // ffl ligature → "ffl"
-        assert_eq!(normalize_text("ba\u{FB04}e"), "baffle");
+        assert_eq!(normalize_text("ba\u{FB04}e".to_string()), "baffle");
     }
 
     #[test]
     fn test_nfc_normalization() {
         // e + combining acute accent → é
-        let input = "e\u{0301}";
+        let input = "e\u{0301}".to_string();
         let result = normalize_text(input);
         assert_eq!(result, "é");
     }
@@ -198,8 +213,8 @@ mod tests {
 
     #[test]
     fn test_korean_text_unchanged() {
-        // Korean text should pass through unchanged
-        assert_eq!(normalize_text("안녕하세요"), "안녕하세요");
+        // Korean text should pass through unchanged (fast path: zero allocation)
+        assert_eq!(normalize_text("안녕하세요".to_string()), "안녕하세요");
     }
 
     #[test]

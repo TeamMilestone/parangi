@@ -9,7 +9,7 @@ pub mod dictionary;
 pub mod glyph_list;
 pub mod predefined;
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 /// A character encoding that maps character codes to glyph names.
 ///

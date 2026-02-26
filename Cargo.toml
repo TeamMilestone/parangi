@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/parang",
     "crates/parang-cli",
-    "crates/pdf-oxide-bench",
 ]
 
 [workspace.package]
@@ -19,6 +18,7 @@ rayon = "1.10"
 memmap2 = "0.9"
 compact_str = "0.8"
 encoding_rs = "0.8"
+hashbrown = "0.15"
 unicode-normalization = "0.1"
 unicode-bidi = "0.3"
 thiserror = "2"

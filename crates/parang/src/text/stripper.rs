@@ -3,7 +3,7 @@
 //! Ported from org.apache.pdfbox.text.PDFTextStripper.
 //! Handles word boundary detection, line detection, and paragraph separation.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use super::comparator::sort_positions;
 use super::normalizer;
@@ -228,8 +228,9 @@ pub fn assemble_text(positions: &mut Vec<TextPosition>, config: &StripperConfig)
         flush_line(&line, &mut output, pending_word_separator, config);
     }
 
-    // Apply Unicode normalization (NFC + ligature decomposition)
-    normalizer::normalize_text(&output)
+    // Apply Unicode normalization (NFC + ligature decomposition).
+    // Takes ownership of `output` — Korean text returns unchanged (zero alloc).
+    normalizer::normalize_text(output)
 }
 
 /// Write a line of TextPositions to the output, inserting word separators
@@ -549,8 +550,6 @@ fn overlap(y1: f32, height1: f32, y2: f32, height2: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::matrix::Matrix;
-
     fn make_tp(
         unicode: &str,
         x: f32,
@@ -560,19 +559,17 @@ mod tests {
         space_width: f32,
     ) -> TextPosition {
         // Note: y in device space. y_dir_adj = page_height - y for direction 0
-        let trm = Matrix::from_values(height, 0.0, 0.0, height, x, y);
+        // trm_a=height means scale_x=height; trm_b=0 means horizontal text (direction 0)
         TextPosition {
             unicode: unicode.into(),
-            char_code: 0,
-            text_matrix: trm,
-            end_x: x + width,
-            end_y: y,
+            trm_a: height,
+            trm_b: 0.0,
+            trm_tx: x,
+            trm_ty: y,
             max_height: height,
             individual_width: width,
             space_width,
             font_size: 12.0,
-            font_size_in_pt: 12,
-            page_rotation: 0,
             page_width: 612.0,
             page_height: 792.0,
         }

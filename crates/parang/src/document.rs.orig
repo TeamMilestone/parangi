@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lopdf::Document;
+use memmap2::Mmap;
 
 use crate::page::PdfPage;
 use crate::{PdfError, Result};
@@ -11,64 +12,64 @@ use crate::{PdfError, Result};
 /// A loaded PDF document.
 ///
 /// Wraps `lopdf::Document` and provides page-level access for text extraction.
-/// The PDF bytes are owned by the Document's backing_buffer (Arc<Vec<u8>>)
-/// for lazy stream content reading.
+/// The document is loaded via memory-mapping for efficient I/O.
 pub struct PdfDocument {
     /// The underlying lopdf document, wrapped in Arc for sharing across threads.
     inner: Arc<Document>,
     /// Page object IDs in document order.
     page_ids: Vec<lopdf::ObjectId>,
+    /// Keep the mmap alive for the lifetime of the document.
+    _mmap: Option<Mmap>,
 }
 
 /// Returns true for stream dictionaries whose content should be skipped
 /// during loading (not needed for text extraction).
 fn should_skip_stream(dict: &lopdf::Dictionary) -> bool {
+    let subtype = dict.get(b"Subtype").and_then(|v| v.as_name()).ok();
     let obj_type = dict.get(b"Type").and_then(|v| v.as_name()).ok();
 
-    // Never skip ObjStm — content must be available immediately to extract
-    // compressed objects during load_objects_raw().
+    // Skip image XObjects (Subtype = Image)
+    if subtype == Some(b"Image".as_slice()) {
+        return true;
+    }
+    // Skip metadata streams (Type = Metadata)
+    if obj_type == Some(b"Metadata".as_slice()) {
+        return true;
+    }
+    // Skip CFF/OpenType font programs (FontFile3)
+    if matches!(subtype, Some(b"CIDFontType0C") | Some(b"Type1C") | Some(b"OpenType")) {
+        return true;
+    }
+    // Skip TrueType font programs (FontFile2): has /Length1 but no /Type or /Subtype
+    // Per PDF spec, /Length1 is only used for font descriptor stream objects.
+    if subtype.is_none() && obj_type.is_none() && dict.has(b"Length1") {
+        return true;
+    }
+    // EXPERIMENT: skip ObjStm content (object streams)
     if obj_type == Some(b"ObjStm".as_slice()) {
-        return false;
+        return true;
     }
-    // Never skip XRef streams — content is needed for cross-reference table building.
-    if obj_type == Some(b"XRef".as_slice()) {
-        return false;
-    }
-    // Skip all other streams: content will be read on demand from the backing buffer.
-    // This avoids large allocations during parse (content streams, CMap, font programs, images, etc.)
-    true
+    false
 }
 
 impl PdfDocument {
-    /// Open a PDF file using an in-memory buffer backed by Arc<Vec<u8>>.
-    ///
-    /// The buffer is stored in the Document as a backing buffer, allowing
-    /// lazy stream content reading without upfront allocation of all stream bytes.
+    /// Open a PDF file using memory-mapped I/O.
     pub fn open(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path)?;
-        let arc_buf = std::sync::Arc::new(bytes);
-        let doc = Document::load_from_arc(std::sync::Arc::clone(&arc_buf), should_skip_stream)?;
-        Self::from_document(doc)
+        let file = std::fs::File::open(path)?;
+        // SAFETY: The file is opened read-only and we keep the Mmap alive
+        // for the lifetime of PdfDocument.
+        let mmap = unsafe { Mmap::map(&file)? };
+        let doc = Document::load_mem_skip_streams(&mmap, should_skip_stream)?;
+        Self::from_document(doc, Some(mmap))
     }
 
     /// Load a PDF from an in-memory byte slice.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        // For in-memory bytes without backing buffer: use the legacy skip predicate
-        // (skips images, font programs, metadata) but NOT lazy loading.
-        fn skip_legacy(dict: &lopdf::Dictionary) -> bool {
-            let subtype = dict.get(b"Subtype").and_then(|v| v.as_name()).ok();
-            let obj_type = dict.get(b"Type").and_then(|v| v.as_name()).ok();
-            if subtype == Some(b"Image".as_slice()) { return true; }
-            if obj_type == Some(b"Metadata".as_slice()) { return true; }
-            if matches!(subtype, Some(b"CIDFontType0C") | Some(b"Type1C") | Some(b"OpenType")) { return true; }
-            if subtype.is_none() && obj_type.is_none() && dict.has(b"Length1") { return true; }
-            false
-        }
-        let doc = Document::load_mem_skip_streams(data, skip_legacy)?;
-        Self::from_document(doc)
+        let doc = Document::load_mem_skip_streams(data, should_skip_stream)?;
+        Self::from_document(doc, None)
     }
 
-    fn from_document(mut doc: Document) -> Result<Self> {
+    fn from_document(mut doc: Document, mmap: Option<Mmap>) -> Result<Self> {
         let profiling = std::env::var_os("LOPDF_PROFILE").is_some();
 
         // Decrypt if encrypted (try empty password, which covers most "owner-only" PDFs)
@@ -85,6 +86,7 @@ impl PdfDocument {
         Ok(Self {
             inner: Arc::new(doc),
             page_ids,
+            _mmap: mmap,
         })
     }
 

@@ -1,4 +1,5 @@
 target/
 .idea/
 .serena/
+.env
 bench-results/
